@@ -1,22 +1,12 @@
 // ==UserScript==
 // @name         Forum_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.1
-// @description  Download images and media from forum posts (Simpcity, etc.).
+// @version      2.0.0
+// @description  Simpcity.cr: media assistant, redirect, thumbs, bulk download from threads.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
-// @match        https://simpcity.cr/threads/*
-// @match        https://simpcity.is/threads/*
-// @match        https://simpcity.cz/threads/*
-// @match        https://simpcity.hk/threads/*
-// @match        https://simpcity.rs/threads/*
-// @match        https://simpcity.ax/threads/*
-// @require      https://unpkg.com/@popperjs/core@2
-// @require      https://unpkg.com/tippy.js@6
-// @require      https://unpkg.com/file-saver@2.0.4/dist/FileSaver.min.js
-// @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.5/jszip.min.js
-// @require      https://raw.githubusercontent.com/geraintluff/sha256/gh-pages/sha256.min.js
+// @match        https://simpcity.cr/*
 // @connect      self
-// @connect      simpcity.su
+// @connect      simpcity.cr
 // @connect      coomer.st
 // @connect      box.com
 // @connect      boxcloud.com
@@ -122,6 +112,45 @@
 // @supportURL   https://github.com/AlexRabbit/Userscripts/issues
 // ==/UserScript==
 
+(function () {
+    if (!/^https:\/\/simpcity\.cr\/redirect\//i.test(location.href)) return;
+    const encodedUrl = new URLSearchParams(location.search).get('to');
+    if (!encodedUrl) return;
+    try {
+        const decodedUrl = atob(encodedUrl);
+        if (decodedUrl.startsWith('http://') || decodedUrl.startsWith('https://')) {
+            location.replace(decodedUrl);
+        }
+    } catch {}
+})();
+
+(function loadForumLibs() {
+    const libs = [
+        ['https://unpkg.com/@popperjs/core@2/dist/umd/popper.min.js', () => window.Popper],
+        ['https://unpkg.com/tippy.js@6/dist/tippy-bundle.umd.min.js', () => window.tippy],
+        ['https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', () => window.JSZip],
+        ['https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js', () => window.saveAs],
+    ];
+    let i = 0;
+    const next = () => {
+        if (i >= libs.length) {
+            window.__forumRabbitLibsReady = true;
+            return;
+        }
+        const [url, ok] = libs[i++];
+        if (ok()) {
+            next();
+            return;
+        }
+        const s = document.createElement('script');
+        s.src = url;
+        s.onload = next;
+        s.onerror = next;
+        (document.head || document.documentElement).appendChild(s);
+    };
+    next();
+})();
+
 function xfpdCloseTabHandle(tabOrPromise) {
     try {
         if (!tabOrPromise) return;
@@ -138,9 +167,20 @@ function xfpdCloseTabHandle(tabOrPromise) {
         }
     } catch (e) {}
 }
-const JSZip = window.JSZip;
-const tippy = window.tippy;
-const http = window.GM_xmlhttpRequest;
+let JSZip = window.JSZip;
+let tippy = window.tippy;
+let http = typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : null;
+
+function bindForumDeps() {
+    JSZip = window.JSZip;
+    tippy = window.tippy;
+    http =
+        typeof GM_xmlhttpRequest === 'function'
+            ? GM_xmlhttpRequest
+            : typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function'
+              ? GM.xmlHttpRequest
+              : http;
+}
 window.isFF = typeof InstallTrigger !== 'undefined';
 window.logs = [];
 
@@ -990,7 +1030,7 @@ const parsers = {
                 }
             });
 
-            [...messageContentClone.querySelectorAll('.contentRow-header > a[href^="https://simpcity.su/threads"]')]
+            [...messageContentClone.querySelectorAll('.contentRow-header > a[href^="https://simpcity.cr/threads"]')]
                 .map(a => a.parentNode.parentNode.parentNode.parentNode)
                 .forEach(i => i.remove());
 
@@ -4223,7 +4263,7 @@ if (page === 1) {
             if (!url.startsWith('/')) url = '/' + url;
 
             if (url.startsWith('/attachments/') || url.startsWith('/data/video/')) {
-                return `https://simpcity.su${url}`;
+                return `https://simpcity.cr${url}`;
             }
 
             return `https://simpcity.su${url}`;
@@ -7011,7 +7051,7 @@ const isView = /https?:\/\/(?:www\.)?filester\.(me|sh|si|gg)\/d\//i.test(String(
                             basename =
                                 parseDispositionFilename(rh) ||
                                 (filename ? filename.name : h.basename(url).replace(/\?.*/, '').replace(/#.*/, ''));
-                        } else if (url.includes('https://simpcity.su/attachments/')) {
+                        } else if (url.includes('https://simpcity.cr/attachments/')) {
                             basename = filename ? filename.name : h.basename(url).replace(/(.*)-(.{3,4})\.\d*$/i, '$1.$2');
                         } else if (url.includes('kemono.cr')) {
                             basename = filename
@@ -7661,7 +7701,19 @@ const selectedPosts = [];
     });
 
     document.addEventListener('DOMContentLoaded', async () => {
-
+        const waitLibs = () =>
+            new Promise((resolve) => {
+                const tick = () => {
+                    if (window.__forumRabbitLibsReady && window.JSZip && window.tippy) {
+                        bindForumDeps();
+                        resolve();
+                        return;
+                    }
+                    setTimeout(tick, 80);
+                };
+                tick();
+            });
+        await waitLibs();
 
         try {
             const { source, status } = await h.http.get('https://api.redgifs.com/v2/auth/temporary', {}, {}, 'text');
@@ -7865,7 +7917,349 @@ const selectedPosts = [];
 })();
 
 
+
+(function () {
+  if (!/simpcity\.cr/i.test(location.hostname)) return;
+  const SC_P = 'sc_ma_';
+  if (typeof GM_getValue !== 'function') {
+    window.GM_getValue = (k, d) => {
+      try {
+        const raw = localStorage.getItem(SC_P + k);
+        if (raw === null) return d;
+        return JSON.parse(raw);
+      } catch {
+        return d;
+      }
+    };
+    window.GM_setValue = (k, v) => {
+      try {
+        localStorage.setItem(SC_P + k, JSON.stringify(v));
+      } catch {}
+    };
+    window.GM_listValues = () =>
+      Object.keys(localStorage)
+        .filter((x) => x.startsWith(SC_P))
+        .map((x) => x.slice(SC_P.length));
+    window.GM_deleteValue = (k) => {
+      try {
+        localStorage.removeItem(SC_P + k);
+      } catch {}
+    };
+    window.GM_registerMenuCommand = () => {};
+  }
+  const run = () => {
+const S='SimpCity Media Assistant',D=5,I=16;let L=true,T=0,C=0,E=0,AS=GM_getValue('autoScrollEnabled',false),SP=GM_getValue('autoScrollSpeed',D),DIR=GM_getValue('autoScrollDirection',1),timer=null,idx=0,imgList=[],hidden=false;
+
+// ===== HARD RESET MENU COMMAND =====
+GM_registerMenuCommand('Reset SimpCity Media Assistant', () => {
+    if (!confirm('Reset all SimpCity Media Assistant settings and reload the page?')) return;
+
+    // Delete every stored value for this script
+    GM_listValues().forEach(key => GM_deleteValue(key));
+
+    // Reload page so script starts fresh
+    location.reload();
+});
+
+// ===== STYLES =====
+const st=document.createElement('style');st.textContent=`.sc-panel{position:fixed;z-index:2147483647;background:rgba(18,18,18,.95);color:#e6e6e6;border-radius:16px;border:1px solid #2b2b2b;padding:12px;font-family:system-ui,sans-serif;font-size:13px;font-weight:bold;box-shadow:0 8px 20px rgba(0,0,0,.6);resize:both;overflow:auto;min-width:200px;min-height:100px;}.sc-header{display:flex;justify-content:space-between;align-items:center;font-weight:bold;color:#3aff9d;margin-bottom:8px;font-size:14px;cursor:move;}.sc-content{display:flex;flex-direction:column;gap:8px;}.sc-btn{background:#1c1c1c;border:1px solid #333;border-radius:10px;padding:10px;text-align:center;cursor:pointer;user-select:none;transition:.25s;font-size:13px;font-weight:bold;position:relative;}.sc-btn:hover:not(.disabled),.sc-btn.active{background:#114d2b;border-color:#3aff9d;color:#3aff9d;}.sc-btn.disabled{background:#333 !important;border-color:#555 !important;color:#888 !important;cursor:not-allowed !important;}.sc-btn-group{display:flex;gap:6px;}.sc-btn.small{padding:6px;font-size:12px;flex:1;}.sc-btn .default-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:#0f0f0f;padding:2px 6px;font-size:11px;border-radius:6px;border:1px solid #333;cursor:pointer;color:#3aff9d;font-weight:bold;}.sc-btn .default-btn:hover{background:#114d2b;border-color:#3aff9d;}#sc-controls{display:flex;flex-direction:column;gap:12px;}.sc-box{background:rgba(28,28,28,.9);border:1px solid #333;border-radius:12px;padding:8px;display:flex;flex-direction:column;gap:6px;}img.bbImage{max-width:200px;cursor:pointer;transition:.25s;}img.bbImage.expanded{display:block;max-width:100% !important;max-height:90vh;margin:10px auto;}.sc-post-expand-btn{margin-left:10px;padding:6px 14px;background:#1c1c1c;border:1px solid #333;border-radius:999px;color:#3aff9d;font-size:12px;cursor:pointer;font-weight:bold;}.sc-post-expand-btn:hover{background:#114d2b;border-color:#3aff9d;color:#3aff9d;}#sc-zoom-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.9);display:none;align-items:center;justify-content:center;z-index:2147483650;cursor:grab;}#sc-zoom-overlay img{max-width:95%;max-height:95%;transition:transform .25s ease;cursor:grab;user-select:none;}#sc-close-zoom-btn{position:fixed;top:14px;right:14px;background:#1c1c1c;border:1px solid #333;border-radius:12px;color:#3aff9d;padding:6px 12px;font-size:13px;cursor:pointer;z-index:2147483660;display:none;transition:.25s;font-weight:bold;}#sc-close-zoom-btn:hover{background:#114d2b;border-color:#3aff9d;color:#fff;}#sc-zoom-arrow-left,#sc-zoom-arrow-right{position:fixed;top:50%;transform:translateY(-50%);background:#1c1c1c;border:1px solid #333;border-radius:12px;color:#3aff9d;padding:6px 12px;font-size:18px;cursor:pointer;z-index:2147483660;display:none;transition:.25s;font-weight:bold;}#sc-zoom-arrow-left:hover,#sc-zoom-arrow-right:hover{background:#114d2b;border-color:#3aff9d;color:#fff;}#sc-zoom-arrow-left{left:14px;}#sc-zoom-arrow-right{right:14px;}#sc-splash{position:fixed;top:0;left:0;width:100%;height:100%;background:black;color:#3aff9d;display:flex;flex-direction:column;justify-content:center;align-items:center;font-family:system-ui,sans-serif;font-size:24px;z-index:2147483670;text-align:center;font-weight:bold;}#sc-splash .count{margin-top:10px;font-size:18px;font-weight:bold;}`;document.head.appendChild(st);
+
+// ===== UTILITIES =====
+const P=(t,id,min=false)=>{let p=document.createElement('div'),h=document.createElement('div'),c=document.createElement('div');p.className='sc-panel';p.id=id;const saved=GM_getValue('panel_'+id,{});p.style.top=saved.top??'120px';p.style.left=saved.left??'14px';p.style.width=saved.width??'360px';p.style.height=saved.height??'auto';h.className='sc-header';h.textContent=t;c.className='sc-content';if(min)c.style.display='none';p.append(h,c);document.body.appendChild(p);let drg=false,ox=0,oy=0;h.style.cursor='move';h.onmousedown=e=>{drg=true;ox=e.clientX-p.offsetLeft;oy=e.clientY-p.offsetTop;document.body.style.userSelect='none';};document.onmousemove=e=>{if(drg){p.style.left=e.clientX-ox+'px';p.style.top=e.clientY-oy+'px';}};document.onmouseup=e=>{if(drg){drg=false;GM_setValue('panel_'+id,{top:p.style.top,left:p.style.left,width:p.style.width,height:p.style.height});document.body.style.userSelect='';}};new ResizeObserver(()=>GM_setValue('panel_'+id,{top:p.style.top,left:p.style.left,width:p.style.width,height:p.style.height})).observe(p);return{panel:p,content:c};};
+const B=(t,cb,cls='sc-btn')=>{let b=document.createElement('div');b.className=cls;b.textContent=t;b.onclick=()=>{if(!L)cb();};return b;};
+
+// ===== PANELS & SPLASH =====
+const splash=document.createElement('div');splash.id='sc-splash';splash.innerHTML=`<div>${S} loading...</div><div class="count">0 / 0</div>`;document.body.appendChild(splash);
+const updateSplash=()=>splash.querySelector('.count').textContent=`Images loaded: ${C} / ${T}`;
+const controls=P(S,'sc-controls');
+
+// ===== MOBILE MODE =====
+let mobileMode = GM_getValue('mobileMode', false);
+
+const mobileBtn = document.createElement('div');
+mobileBtn.style.cssText = `
+    margin-left:auto;
+    background:#1c1c1c;
+    border:1px solid #333;
+    border-radius:8px;
+    padding:4px 6px;
+    font-size:11px;
+    cursor:pointer;
+    color:#3aff9d;
+`;
+
+controls.panel.querySelector('.sc-header').appendChild(mobileBtn);
+
+// Store original labels
+const originalLabels = new WeakMap();
+let updating = false;
+
+// Short label logic
+const getShort = (text) => {
+    if (!text) return "?";
+
+    // directions (UPDATED)
+    if (text.includes("Up")) return "U";
+    if (text.includes("Down")) return "D";
+    if (text.includes("↑")) return "U";
+    if (text.includes("↓")) return "D";
+
+    // hide/show (for mobile hide button)
+    if (text.includes("Hide")) return "H";
+    if (text.includes("Show")) return "H";
+
+    // rest unchanged
+    if (text.includes("Top")) return "T";
+    if (text.includes("Bottom")) return "B";
+    if (text.includes("Expand")) return "E";
+    if (text.includes("Collapse")) return "C";
+    if (text.includes("Gallery")) return "G";
+    if (text.includes("Auto")) return "A";
+    if (text.includes("+")) return "+";
+    if (text.includes("-")) return "-";
+
+    return text[0];
+};
+
+const applyCompactLabels = () => {
+    if (updating) return;
+    updating = true;
+
+    const buttons = controls.panel.querySelectorAll('.sc-btn');
+
+    buttons.forEach(btn => {
+        const current = btn.textContent;
+
+        // Save latest real label
+        originalLabels.set(btn, current);
+
+        const short = getShort(current);
+
+        if (btn.textContent !== short) {
+            btn.textContent = short;
+        }
+
+        btn.title = current;
+        btn.style.padding = '4px 0';
+        btn.style.fontSize = '10px';
+        btn.style.textAlign = 'center';
+    });
+
+    updating = false;
+};
+
+const restoreLabels = () => {
+    const buttons = controls.panel.querySelectorAll('.sc-btn');
+
+    buttons.forEach(btn => {
+        if (originalLabels.has(btn)) {
+            btn.textContent = originalLabels.get(btn);
+        }
+
+        btn.title = '';
+        btn.style.padding = '';
+        btn.style.fontSize = '';
+        btn.style.textAlign = '';
+    });
+};
+
+const applyMobileMode = () => {
+    const header = controls.panel.querySelector('.sc-header');
+
+    if (mobileMode) {
+        mobileBtn.textContent = 'M';
+
+        controls.panel.style.width = '50px';
+        controls.panel.style.minWidth = '50px';
+        controls.panel.style.padding = '3px';
+        controls.content.style.gap = '3px';
+
+        // Remove title text only
+        header.childNodes.forEach(node => {
+            if (node.nodeType === 3) node.textContent = '';
+        });
+
+        applyCompactLabels();
+
+    } else {
+        mobileBtn.textContent = 'Mobile';
+
+        const saved = GM_getValue('panel_sc-controls', {});
+        controls.panel.style.width = saved.width || '360px';
+        controls.panel.style.minWidth = '';
+        controls.panel.style.padding = '12px';
+        controls.content.style.gap = '8px';
+
+        header.firstChild.textContent = S;
+
+        restoreLabels();
+    }
+};
+
+// ===== RESET SCRIPT FUNCTION =====
+const fullReset = () => {
+    if (!confirm('Exit Mobile Mode And Reset SimpCity Media Assistant?')) return;
+
+    GM_listValues().forEach(key => GM_deleteValue(key));
+    location.reload();
+};
+
+// ===== MOBILE BUTTON TOGGLE =====
+mobileBtn.onclick = () => {
+    mobileMode = !mobileMode;
+    GM_setValue('mobileMode', mobileMode);
+
+    if (!mobileMode) {
+        // EXIT MOBILE MODE → FULL RESET 
+        fullReset();
+        return;
+    }
+
+    applyMobileMode();
+};
+
+// 🔥 SAFE re-apply after clicks 
+controls.panel.addEventListener('click', () => {
+    if (mobileMode) {
+        setTimeout(applyCompactLabels, 50);
+    }
+});
+
+// Initial apply
+setTimeout(applyMobileMode, 500);
+
+// ===== SAFE HIDE PANEL =====
+let panelHidden = GM_getValue('panelHidden', false);
+
+const hideBtn = document.createElement('div');
+hideBtn.style.cssText = `
+    margin-left:6px;
+    background:#1c1c1c;
+    border:1px solid #333;
+    border-radius:8px;
+    padding:4px 6px;
+    font-size:11px;
+    cursor:pointer;
+    color:#3aff9d;
+    user-select:none;
+    line-height:1;
+`;
+
+controls.panel.querySelector('.sc-header').appendChild(hideBtn);
+
+const updateHideBtn = () => {
+    const isMobile = GM_getValue('mobileMode', false);
+
+    // content toggle
+    controls.content.style.display = panelHidden ? 'none' : 'flex';
+
+    // label
+    if (isMobile) {
+        hideBtn.textContent = 'H';
+        hideBtn.style.width = '22px';
+        hideBtn.style.height = '22px';
+        hideBtn.style.display = 'flex';
+        hideBtn.style.alignItems = 'center';
+        hideBtn.style.justifyContent = 'center';
+        hideBtn.style.fontSize = '10px';
+        hideBtn.style.padding = '0';
+        hideBtn.title = panelHidden ? 'Show Panel' : 'Hide Panel';
+    } else {
+        hideBtn.textContent = panelHidden ? 'Show' : 'Hide';
+        hideBtn.style.width = '';
+        hideBtn.style.height = '';
+        hideBtn.style.padding = '4px 6px';
+        hideBtn.style.fontSize = '11px';
+        hideBtn.title = '';
+    }
+};
+
+hideBtn.onclick = () => {
+    panelHidden = !panelHidden;
+    GM_setValue('panelHidden', panelHidden);
+    updateHideBtn();
+};
+
+// IMPORTANT: safe init only once
+setTimeout(updateHideBtn, 200);
+
+// ===== AUTO SCROLL =====
+const autoBox=document.createElement('div');autoBox.className='sc-box';
+const autoL=document.createElement('span');autoL.textContent=`Auto Scroll ${SP.toFixed(1)}`;
+const autoB=document.createElement('div');autoB.className='sc-btn';autoB.appendChild(autoL);autoB.classList.toggle('active',AS);
+autoB.onclick=()=>{AS=!AS;autoB.classList.toggle('active',AS);GM_setValue('autoScrollEnabled',AS);clearInterval(timer);if(AS)timer=setInterval(()=>window.scrollBy(0,SP*DIR),I);};
+const defB=document.createElement('div');defB.className='default-btn';defB.textContent='Default';defB.onclick=e=>{e.stopPropagation();SP=D;GM_setValue('autoScrollSpeed',SP);autoL.textContent=`Auto Scroll ${SP.toFixed(1)}`;};
+autoB.appendChild(defB);
+const dirG=document.createElement('div');dirG.className='sc-btn-group';
+const upB=B('Up',()=>{DIR=-1;GM_setValue('autoScrollDirection',DIR);upB.classList.add('active');downB.classList.remove('active');},'sc-btn small');
+const downB=B('Down',()=>{DIR=1;GM_setValue('autoScrollDirection',DIR);downB.classList.add('active');upB.classList.remove('active');},'sc-btn small active');
+dirG.append(upB,downB);
+const speedG=document.createElement('div');speedG.className='sc-btn-group';
+const spU=B('+ Speed',()=>{SP+=1;GM_setValue('autoScrollSpeed',SP);autoL.textContent=`Auto Scroll ${SP.toFixed(1)}`;},'sc-btn small');
+const spD=B('- Speed',()=>{SP=Math.max(.5, SP-0.5);GM_setValue('autoScrollSpeed',SP);autoL.textContent=`Auto Scroll ${SP.toFixed(1)}`;},'sc-btn small');
+speedG.append(spD,spU);
+autoBox.append(autoB,dirG,speedG);controls.content.appendChild(autoBox);
+
+// ===== OTHER CONTROLS =====
+controls.content.appendChild(B('Scroll To Top',()=>{if(AS){clearInterval(timer);AS=false;autoB.classList.remove('active');GM_setValue('autoScrollEnabled',AS);}window.scrollTo({top:0,behavior:'smooth'});}));
+controls.content.appendChild(B('Scroll To Bottom',()=>{if(AS){clearInterval(timer);AS=false;autoB.classList.remove('active');GM_setValue('autoScrollEnabled',AS);}window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});}));
+
+// ===== HIDE & EXPAND ALL =====
+const hideAllBtn=B('Hide All Images',()=>{hidden=!hidden;document.querySelectorAll('img.bbImage').forEach(i=>{i.classList.remove('expanded');i.style.display=hidden?'none':'';});hideAllBtn.textContent=hidden?'Show All Images':'Hide All Images';expandAllBtn.classList.toggle('disabled',hidden);document.querySelectorAll('.sc-post-expand-btn').forEach(btn=>btn.style.display=hidden?'none':'inline-block');if(hidden){expandAllBtn.textContent='Expand All Images';syncPostBtns(true);}else syncPostBtns();});
+controls.content.appendChild(hideAllBtn);
+const expandAllBtn=B('Expand All Images',()=>{window.scrollTo({top:0,behavior:'smooth'});const imgs=document.querySelectorAll('img.bbImage');const expanded=[...imgs].every(i=>i.classList.contains('expanded'));const newState=!expanded;imgs.forEach(i=>i.classList.toggle('expanded',newState));expandAllBtn.textContent=newState?'Collapse All Images':'Expand All Images';document.querySelectorAll('.sc-post-expand-btn').forEach(btn=>btn.style.display='inline-block');hidden=false;hideAllBtn.textContent='Hide All Images';expandAllBtn.classList.remove('disabled');syncPostBtns();});
+controls.content.appendChild(expandAllBtn);
+
+// ===== GALLERY VIEW =====
+const galleryBtn=B('Gallery View',()=>{const first=document.querySelector('img.bbImage');if(first)first.click();});
+controls.content.appendChild(galleryBtn);
+
+// ===== POST BUTTONS =====
+const syncPostBtns=(reset=false)=>{document.querySelectorAll('article.message').forEach(post=>{const top=post.querySelectorAll('.sc-post-expand-btn')[0];const bottom=post.querySelectorAll('.sc-post-expand-btn')[1];if(top&&bottom){if(reset){top.textContent=bottom.textContent='Expand Post Images';}else{const imgs=Array.from(post.querySelectorAll('img.bbImage')).filter(i=>i.style.display!=='none');top.textContent=bottom.textContent=imgs.length===0?'Expand Post Images':imgs.every(i=>i.classList.contains('expanded'))?'Collapse Post Images':'Expand Post Images';}}});};
+const addPostBtns=()=>{document.querySelectorAll('article.message').forEach(post=>{if(post.dataset.scAdded)return;const header=post.querySelector('.message-attribution');const body=post.querySelector('.message-body');if(!header||!body)return;const topBtn=document.createElement('span');topBtn.className='sc-post-expand-btn';topBtn.textContent='Expand Post Images';const bottomBtn=document.createElement('span');bottomBtn.className='sc-post-expand-btn';bottomBtn.textContent='Expand Post Images';bottomBtn.style.marginTop='10px';const toggleFunc=()=>{const imgs=body.querySelectorAll('img.bbImage');const expanded=[...imgs].every(i=>i.classList.contains('expanded'));imgs.forEach(i=>i.classList.toggle('expanded',!expanded));syncPostBtns();};topBtn.onclick=bottomBtn.onclick=toggleFunc;header.appendChild(topBtn);body.appendChild(bottomBtn);post.dataset.scAdded='true';});};
+
+// ===== MEDIA LOADING =====
+const norm=s=>s.replace('.md.','.').replace('.th.','.');
+const chk=()=>{updateSplash();if(C+E>=T){L=false;splash.style.display='none';controls.panel.style.display='flex';if(AS){clearInterval(timer);timer=setInterval(()=>window.scrollBy(0,SP*DIR),I);}}};
+const loadM=()=>{const imgs=document.querySelectorAll('img.bbImage');T=imgs.length;C=0;E=0;L=true;splash.style.display='flex';updateSplash();imgs.forEach(i=>{i.src=norm(i.src);i.removeAttribute('srcset');i.loading='eager';if(i.complete){C++;updateSplash();}else{i.onload=()=>{C++;updateSplash();chk();};i.onerror=()=>{E++;updateSplash();chk();}}});chk();};
+
+// ===== CLICK TO EXPAND =====
+const expandClick=()=>document.querySelectorAll('a[role="button"]').forEach(el=>{if(el.offsetParent&&el.textContent.toLowerCase().includes('click to expand'))el.click();});
+window.scrollTo({top:0,behavior:'smooth'});expandClick();
+new MutationObserver(expandClick).observe(document.body,{childList:true,subtree:true});
+loadM();addPostBtns();new MutationObserver(addPostBtns).observe(document.body,{childList:true,subtree:true});
+
+// ===== AUTO SCROLL STOP ON PAGE CHANGE =====
+let lastUrl=location.href;new MutationObserver(()=>{if(location.href!==lastUrl){lastUrl=location.href;if(AS){clearInterval(timer);AS=false;autoB.classList.remove('active');GM_setValue('autoScrollEnabled',AS);}}}).observe(document.body,{childList:true,subtree:true});
+
+// ===== ZOOM / PAN / COUNTER =====
+const zo=document.createElement('div');zo.id='sc-zoom-overlay';const zi=document.createElement('img');zo.appendChild(zi);document.body.appendChild(zo);
+let s=1,dr=false,dx=0,dy=0,sx=0,sy=0;
+const cb=document.createElement('div');cb.id='sc-close-zoom-btn';cb.textContent='Close Photo';document.body.appendChild(cb);
+const l=document.createElement('div');l.id='sc-zoom-arrow-left';l.textContent='L';document.body.appendChild(l);
+const r=document.createElement('div');r.id='sc-zoom-arrow-right';r.textContent='R';document.body.appendChild(r);
+const counter=document.createElement('div');counter.style.cssText='position:fixed;top:20px;left:50%;transform:translateX(-50%);color:#3aff9d;font-size:16px;font-weight:bold;z-index:2147483665;pointer-events:none;';document.body.appendChild(counter);
+const updateCounter=()=>{counter.textContent=`${idx+1} / ${imgList.length}`;};
+const openZ=(src,e)=>{e.preventDefault();e.stopPropagation();if(AS)clearInterval(timer);zi.src=src;imgList=Array.from(document.querySelectorAll('img.bbImage'));idx=imgList.indexOf(e.currentTarget);s=1;dx=0;dy=0;zi.style.transform='translate(0,0) scale(1)';zo.style.display='flex';cb.style.display='block';l.style.display='block';r.style.display='block';updateCounter();};
+zo.addEventListener('wheel',e=>{if(zo.style.display!=='flex')return;e.preventDefault();const r=zi.getBoundingClientRect(),cx=r.width/2,cy=r.height/2,fx=e.clientX-r.left-cx,fy=e.clientY-r.top-cy,f=e.deltaY<0?1.5:1/1.5;let ns=s*f;ns=Math.min(Math.max(ns,.5),100);dx-=fx*(ns/s-1);dy-=fy*(ns/s-1);s=ns;zi.style.transform=`translate(${dx}px,${dy}px) scale(${s})`;},{passive:false});
+zi.addEventListener('mousedown',e=>{e.preventDefault();dr=true;sx=e.clientX-dx;sy=e.clientY-dy;zi.style.cursor='grabbing';});
+document.addEventListener('mousemove',e=>{if(!dr)return;dx=e.clientX-sx;dy=e.clientY-sy;zi.style.transform=`translate(${dx}px,${dy}px) scale(${s})`;});
+document.addEventListener('mouseup',()=>{dr=false;zi.style.cursor='grab';});
+const closeZ=()=>{zo.style.display='none';cb.style.display='none';l.style.display='none';r.style.display='none';counter.textContent='';if(AS)timer=setInterval(()=>window.scrollBy(0,SP*DIR),I);};
+cb.onclick=closeZ;l.onclick=()=>{idx=(idx-1+imgList.length)%imgList.length;zi.src=imgList[idx].src;s=1;dx=0;dy=0;zi.style.transform='translate(0,0) scale(1)';updateCounter();};
+r.onclick=()=>{idx=(idx+1)%imgList.length;zi.src=imgList[idx].src;s=1;dx=0;dy=0;zi.style.transform='translate(0,0) scale(1)';updateCounter();};
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeZ();if(e.key==='ArrowRight'&&zo.style.display==='flex')r.click();if(e.key==='ArrowLeft'&&zo.style.display==='flex')l.click();});
+const attachZ=()=>{document.querySelectorAll('img.bbImage').forEach(i=>{if(i.dataset.z)return;i.addEventListener('click',e=>openZ(i.src,e));i.dataset.z='true';});};
+attachZ();new MutationObserver(attachZ).observe(document.body,{childList:true,subtree:true});
+  };
+  if (document.body) run();
+  else document.addEventListener('DOMContentLoaded', run, { once: true });
+})();
+
 /*
 Credits — modified by AlexRabbit (https://github.com/AlexRabbit)
   - SkyCloudDev — ForumPostDownloader
+  - Greasy Fork 564652 — SimpCity Media Assistant
+  - Greasy Fork 566259 — SimpCity Auto Redirect
+  - Greasy Fork 548505 — compact thumbs (via Media Assistant)
 */

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      2.0.0
+// @version      2.0.1
 // @description  Ultimate video controls, downloads (posts/stories), overlay unlock. AdGuard-ready.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.instagram.com/*
@@ -2377,6 +2377,12 @@
 (function () {
     'use strict';
 
+    const btnStyle = document.createElement('style');
+    btnStyle.id = 'ig-rabbit-dl-btns';
+    btnStyle.textContent =
+        '.custom-btn{display:inline-flex!important;align-items:center!important;position:relative!important;z-index:2147483647!important;vertical-align:middle!important;pointer-events:auto!important}';
+    (document.head || document.documentElement).appendChild(btnStyle);
+
     const disableNewUrlFetchMethod = false;
     const prefetchAndAttachLink = false;
     const hoverToFetchAndAttachLink = true;
@@ -2489,7 +2495,7 @@
         let articleList = document.querySelectorAll('article');
         for (let i = 0; i < articleList.length; i++) {
             let buttonAnchor = (Array.from(articleList[i].querySelectorAll(savePostSelector))).pop();
-            if (buttonAnchor && articleList[i].getElementsByClassName('custom-btn').length === 0) {
+            if (buttonAnchor && !articleList[i].querySelector('.custom-btn')) {
                 addCustomBtn(buttonAnchor, iconColor, append2Post);
             }
         }
@@ -2529,7 +2535,9 @@
     }
 
     function append2Header(node, btn) {
-        node.parentNode.parentNode.parentNode.appendChild(btn, node.parentNode.parentNode);
+        const row = node.parentNode?.parentNode?.parentNode;
+        if (row) row.append(btn);
+        else node.parentNode?.parentNode?.append(btn);
     }
 
     function append2Story(node, btn) {

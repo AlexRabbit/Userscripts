@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         TikTok_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.0
-// @description  No-watermark TikTok download via TikWM; Save button beside Favorites. AdGuard-ready.
+// @version      1.1.0
+// @description  No-watermark TikTok download via TikWM; hijacks Favorites/Save button on all pages. AdGuard-ready.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.tiktok.com/*
 // @match        https://m.tiktok.com/*
 // @grant        none
-// @run-at       document-idle
+// @run-at       document-start
 // @license      MIT
 // @downloadURL  https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/TikTok_Rabbit.js
 // @updateURL    https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/TikTok_Rabbit.js
@@ -23,7 +23,8 @@
     const SESSION_KEY = 'tiktok_rabbit_sessionid';
     const POLL_MS = 1000;
     const POLL_MAX = 60;
-    const BTN_ID = 'tiktok-rabbit-save-btn';
+
+    const FAV_E2E = new Set(['video-favorite', 'browse-favorite', 'undefined-favorite']);
 
     const API_HEADERS = {
         'User-Agent': navigator.userAgent,
@@ -136,20 +137,61 @@
         return `${username} - ${dateStr} - ${profileUid} - ${videoId}${ext}`;
     };
 
-    const resolvePageUrl = () => {
+    const parseUniversalData = () => {
+        const el = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+        if (!el) return null;
+        try {
+            const data = JSON.parse(el.textContent);
+            const scope = data?.__DEFAULT_SCOPE__ || {};
+            for (const key of Object.keys(scope)) {
+                const block = scope[key];
+                const item =
+                    block?.itemInfo?.itemStruct ||
+                    block?.itemStruct ||
+                    block?.videoDetail?.itemInfo?.itemStruct;
+                if (!item?.id) continue;
+                const user = item.author?.uniqueId || item.author?.unique_id || 'user';
+                const kind = item.imagePost || /photo/.test(location.pathname) ? 'photo' : 'video';
+                return normalizeUrl(`https://www.tiktok.com/@${user}/${kind}/${item.id}`);
+            }
+        } catch {}
+        return null;
+    };
+
+    const urlFromVideoContext = (root) => {
+        if (!root) return null;
+        const a = root.querySelector('a[href*="/video/"], a[href*="/photo/"]');
+        if (a?.href) return normalizeUrl(a.href);
+        const v = root.querySelector('video');
+        if (v) {
+            const near = v.closest('div')?.querySelector('a[href*="/video/"], a[href*="/photo/"]');
+            if (near?.href) return normalizeUrl(near.href);
+        }
+        return null;
+    };
+
+    const resolvePageUrl = (clickTarget) => {
+        const fromClick = (() => {
+            const root =
+                clickTarget?.closest('[data-e2e="browse-video"]') ||
+                clickTarget?.closest('[data-e2e="video-detail"]') ||
+                clickTarget?.closest('[data-e2e="video-player"]') ||
+                clickTarget?.closest('article') ||
+                clickTarget?.closest('section');
+            return urlFromVideoContext(root);
+        })();
+        if (fromClick) return fromClick;
+
         const canonical = document.querySelector('link[rel="canonical"]')?.href;
-        if (canonical && /tiktok\.com/.test(canonical) && /\/(video|photo)\//.test(canonical)) {
-            return canonical;
-        }
+        if (canonical && /\/(video|photo)\/\d+/.test(canonical)) return normalizeUrl(canonical);
+
         const href = location.href;
-        if (/\/(video|photo)\/\d+/.test(href)) return href;
-        const share = document.querySelector('[data-e2e="browse-share"]')?.closest('section');
-        const video = document.querySelector('video');
-        if (video) {
-            const a = document.querySelector('a[href*="/video/"]');
-            if (a?.href) return a.href;
-        }
-        return href;
+        if (/\/(video|photo)\/\d+/.test(href)) return normalizeUrl(href);
+
+        const universal = parseUniversalData();
+        if (universal) return universal;
+
+        return urlFromVideoContext(document);
     };
 
     const submitTikwm = async (tiktokUrl) => {
@@ -239,11 +281,12 @@
         setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
     };
 
-    const downloadEntry = async (entry) => {
+    const downloadEntry = async (entry, pageUrl) => {
         const images = entry.images || [];
         const playUrl = entry.play_url;
+        const isPhoto = /\/photo\//.test(pageUrl);
 
-        if (images.length && (!playUrl || /\/photo\//.test(location.pathname))) {
+        if (images.length && (!playUrl || isPhoto)) {
             const base = buildFilename(entry, '');
             let ok = 0;
             for (let i = 0; i < images.length; i++) {
@@ -272,97 +315,76 @@
 
     let busy = false;
 
-    const onSaveClick = async (btn) => {
-        if (busy) return;
-        busy = true;
-        const prev = btn.textContent;
-        btn.textContent = '…';
-        btn.disabled = true;
-        try {
-            const pageUrl = resolvePageUrl();
-            if (!/\/(video|photo)\/\d+/.test(pageUrl) && !extractMediaId(pageUrl)) {
-                alert('Open a TikTok video or photo post first.');
-                return;
+    const findFavoriteControl = (target) => {
+        let el = target;
+        while (el && el !== document.documentElement) {
+            const e2e = el.getAttribute?.('data-e2e');
+            if (e2e && FAV_E2E.has(e2e)) return el;
+            const label = (el.getAttribute?.('aria-label') || '').toLowerCase();
+            if (
+                el.tagName === 'BUTTON' &&
+                (label.includes('favorite') ||
+                    label.includes('favourite') ||
+                    label.includes('bookmark') ||
+                    label.includes('save'))
+            ) {
+                return el;
             }
-            const entry = await fetchEntry(pageUrl);
-            if (!entry) {
-                alert('Could not get download link. Try again or set session ID for private posts.');
-                return;
-            }
-            await downloadEntry(entry);
-        } catch (e) {
-            console.error('[TikTok_Rabbit]', e);
-            alert('Download failed. See console for details.');
-        } finally {
-            btn.textContent = prev;
-            btn.disabled = false;
-            busy = false;
-        }
-    };
-
-    const makeButton = () => {
-        const btn = document.createElement('button');
-        btn.id = BTN_ID;
-        btn.type = 'button';
-        btn.title = 'Save without watermark (TikTok_Rabbit)';
-        btn.setAttribute('aria-label', 'Save video');
-        btn.textContent = 'Save';
-        Object.assign(btn.style, {
-            marginLeft: '8px',
-            padding: '0 12px',
-            height: '32px',
-            borderRadius: '4px',
-            border: 'none',
-            cursor: 'pointer',
-            fontWeight: '600',
-            fontSize: '14px',
-            fontFamily: 'inherit',
-            background: 'rgba(255,255,255,0.12)',
-            color: '#fff',
-            flexShrink: '0',
-        });
-        btn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onSaveClick(btn);
-        });
-        return btn;
-    };
-
-    const findAnchor = () => {
-        const selectors = [
-            '[data-e2e="browse-favorite"]',
-            '[data-e2e="undefined-favorite"]',
-            'button[aria-label*="Favorite" i]',
-            'button[aria-label*="Bookmark" i]',
-            'button[aria-label*="Favorit" i]',
-        ];
-        for (const sel of selectors) {
-            const el = document.querySelector(sel);
-            if (el) return el;
+            el = el.parentElement;
         }
         return null;
     };
 
-    const injectButton = () => {
-        if (document.getElementById(BTN_ID)) return;
-        const anchor = findAnchor();
-        if (!anchor) return;
-        const parent = anchor.parentElement;
-        if (!parent) return;
-        const btn = makeButton();
-        if (anchor.nextSibling) parent.insertBefore(btn, anchor.nextSibling);
-        else parent.appendChild(btn);
+    const runDownload = async (clickTarget) => {
+        if (busy) return;
+        busy = true;
+        try {
+            const pageUrl = resolvePageUrl(clickTarget);
+            if (!pageUrl || !extractMediaId(pageUrl)) {
+                alert('Could not detect this TikTok video URL. Open the video page and try again.');
+                return;
+            }
+            const entry = await fetchEntry(pageUrl);
+            if (!entry) {
+                alert('Could not get download link. Try again or set tiktok_rabbit_sessionid for private posts.');
+                return;
+            }
+            await downloadEntry(entry, pageUrl);
+        } catch (e) {
+            console.error('[TikTok_Rabbit]', e);
+            alert('Download failed. See console for details.');
+        } finally {
+            busy = false;
+        }
     };
 
-    injectButton();
-    const obs = new MutationObserver(() => injectButton());
-    obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    document.addEventListener(
+        'click',
+        (e) => {
+            const fav = findFavoriteControl(e.target);
+            if (!fav) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            runDownload(fav);
+        },
+        true
+    );
+
+    document.addEventListener(
+        'pointerdown',
+        (e) => {
+            const fav = findFavoriteControl(e.target);
+            if (!fav) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        },
+        true
+    );
 })();
 
 /*
 Credits — modified by AlexRabbit (https://github.com/AlexRabbit)
   - AlexRabbit — Ez-TikTok-Downloader (TikWM flow, filenames, cache)
-  - Greasy Fork 577695 / 576654 — UI placement inspiration for Save button
+  - Greasy Fork 577695 / 576654 — Favorites button hook pattern
   - TikWM — https://www.tikwm.com API
 */
