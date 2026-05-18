@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TikTok_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.3.0
-// @description  No-watermark TikTok download via TikWM; download button beside bookmark on FYP and video pages.
+// @version      1.4.0
+// @description  No-watermark TikTok download via TikWM; FYP vertical button + 4th button on video pages (Like/Comment/Save/DL).
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.tiktok.com/*
 // @match        https://m.tiktok.com/*
@@ -43,10 +43,13 @@
     const COLLECT_SELECTORS = [
         '[data-e2e="browse-collect"]',
         '[data-e2e="video-collect"]',
+        '[data-e2e="browse-collect-icon"]',
+        '[data-e2e="video-collect-icon"]',
         '[data-e2e="browse-collection"]',
         '[data-e2e="video-collection"]',
         '[data-e2e="browse-favorite"]',
         '[data-e2e="video-favorite"]',
+        '[data-e2e="undefined-icon"]',
     ];
 
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -572,33 +575,75 @@
         return Math.max(48, Math.min(size, 56));
     };
 
-    const buildDownloadBlock = (refControl, videoUrl) => {
+    const isVideoDetailPage = () => /\/@[\w.-]+\/(video|photo)\/\d+/.test(location.pathname);
+
+    const isHorizontalActionRow = (row) => {
+        if (!row?.children?.length) return false;
+        if (isVideoDetailPage()) return true;
+        const kids = [...row.children].filter((c) => !c.hasAttribute('data-tiktok-rabbit-dl'));
+        if (kids.length < 2) return false;
+        const a = kids[0].getBoundingClientRect();
+        const b = kids[1].getBoundingClientRect();
+        return Math.abs(a.top - b.top) < 24 && b.left > a.left + 8;
+    };
+
+    const wireDownloadClick = (block) => {
+        const click = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            runDownload(block);
+        };
+        block.querySelectorAll('button, [role="button"]').forEach((el) => {
+            el.addEventListener('click', click, true);
+        });
+    };
+
+    const buildDownloadBlockVertical = (refControl, videoUrl) => {
         const size = measureBtnSize(refControl);
-        const block = document.createElement('div');
+        const block = document.createElement('motion-button');
         block.setAttribute('data-tiktok-rabbit-dl', '1');
         block.setAttribute('data-video-url', videoUrl || urlFromLocation() || '');
-        block.className = 'tiktok-rabbit-dl-wrap';
+        block.className = 'tiktok-rabbit-dl-wrap tiktok-rabbit-dl-vertical';
 
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.setAttribute('aria-label', 'Download video');
         btn.setAttribute('title', 'Download without watermark');
         btn.appendChild(downloadSvg(Math.round(size * 0.5)));
-        btn.addEventListener(
-            'click',
-            (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                e.stopImmediatePropagation();
-                runDownload(block);
-            },
-            true
-        );
 
         const label = document.createElement('strong');
         label.textContent = 'Save';
         label.setAttribute('data-e2e', 'rabbit-download-count');
         block.append(btn, label);
+        wireDownloadClick(block);
+        return block;
+    };
+
+    const buildDownloadBlockHorizontal = (templateItem, videoUrl) => {
+        const block = templateItem.cloneNode(true);
+        block.setAttribute('data-tiktok-rabbit-dl', '1');
+        block.setAttribute('data-video-url', videoUrl || urlFromLocation() || '');
+        block.classList.add('tiktok-rabbit-dl-wrap', 'tiktok-rabbit-dl-inline');
+
+        const btn = block.querySelector('button, [role="button"]');
+        if (btn) {
+            const fresh = btn.cloneNode(false);
+            fresh.type = 'button';
+            fresh.setAttribute('aria-label', 'Download video');
+            fresh.setAttribute('title', 'Download without watermark');
+            fresh.appendChild(downloadSvg(22));
+            btn.replaceWith(fresh);
+        }
+
+        block.querySelectorAll('strong, span, p').forEach((el) => {
+            const t = (el.textContent || '').trim();
+            if (/^[\d,.]+[KMB]?$/i.test(t) || /^\d+$/.test(t)) {
+                el.textContent = 'DL';
+            }
+        });
+
+        wireDownloadClick(block);
         return block;
     };
 
@@ -617,48 +662,101 @@
         return [...found];
     };
 
+    const findBookmarkActionItem = () => {
+        for (const node of findBookmarkNodes()) {
+            const control = getCollectControl(node);
+            if (!control) continue;
+            return getActionItem(control);
+        }
+        const likeItem = document.querySelector(
+            '[data-e2e="browse-like-icon"], [data-e2e="video-like-icon"], [data-e2e="like-icon"]'
+        );
+        if (likeItem) {
+            const item = getActionItem(getCollectControl(likeItem) || likeItem);
+            const row = item?.parentElement;
+            if (row) {
+                const kids = [...row.children];
+                const collect = kids.find((c) => isBookmarkNode(c));
+                if (collect) return getActionItem(getCollectControl(collect));
+            }
+        }
+        return null;
+    };
+
+    const findVideoDetailActionRow = () => {
+        let bookmarkItem = findBookmarkActionItem();
+        if (bookmarkItem) return bookmarkItem;
+
+        const collect = document.querySelector(
+            '[data-e2e="video-collect-icon"], [data-e2e="browse-collect-icon"], [data-e2e="video-collect"], [data-e2e="browse-collect"]'
+        );
+        if (collect) return getActionItem(getCollectControl(collect) || collect);
+
+        const candidates = document.querySelectorAll(
+            '[class*="ActionBar"], [data-e2e*="comment-avatar"], section div'
+        );
+        for (const row of candidates) {
+            const hasLike = row.querySelector('[data-e2e*="like"]');
+            const hasComment = row.querySelector('[data-e2e*="comment"]');
+            const hasCollect = row.querySelector('[data-e2e*="collect"], [aria-label*="Favorite" i]');
+            if (!hasLike || !hasComment || !hasCollect) continue;
+            const item = getActionItem(getCollectControl(hasCollect) || hasCollect);
+            if (item) return item;
+        }
+        return null;
+    };
+
+    const injectVideoDetailRow = () => {
+        if (!isVideoDetailPage()) return;
+        if (document.querySelector('.tiktok-rabbit-dl-inline')) return;
+
+        const bookmarkItem = findVideoDetailActionRow();
+        if (!bookmarkItem?.parentElement) return;
+
+        const videoUrl = urlFromLocation() || parseUniversalData() || '';
+        const dl = buildDownloadBlockHorizontal(bookmarkItem, videoUrl);
+        bookmarkItem.insertAdjacentElement('afterend', dl);
+    };
+
     const injectBesideBookmark = (bookmarkNode) => {
+        if (isVideoDetailPage()) return;
+
         const control = getCollectControl(bookmarkNode);
         if (!control) return;
         const actionItem = getActionItem(control);
         if (!actionItem?.parentElement) return;
         if (actionItem.nextElementSibling?.hasAttribute('data-tiktok-rabbit-dl')) return;
+        if (document.querySelector(`[data-tiktok-rabbit-dl][data-video-url]`)) return;
 
+        const row = actionItem.parentElement;
         const videoUrl = resolveVideoUrl(control) || urlFromLocation() || '';
-        const dl = buildDownloadBlock(control, videoUrl);
-        actionItem.insertAdjacentElement('afterend', dl);
-    };
 
-    const injectVideoPageFallback = () => {
-        if (!/\/(video|photo)\//.test(location.pathname)) return;
-        if (document.querySelector('[data-tiktok-rabbit-dl]')) return;
-
-        const bar =
-            document.querySelector('[data-e2e="video-player-actions"]') ||
-            document.querySelector('[data-e2e="browse-video-actions"]') ||
-            document.querySelector('[class*="ActionBar"]') ||
-            document.querySelector('section [class*="ActionBar"]');
-
-        const videoUrl = urlFromLocation() || parseUniversalData() || '';
-        if (bar) {
-            const dl = buildDownloadBlock(bar.firstElementChild || bar, videoUrl);
-            bar.appendChild(dl);
+        if (isHorizontalActionRow(row)) {
+            const dl = buildDownloadBlockHorizontal(actionItem, videoUrl);
+            actionItem.insertAdjacentElement('afterend', dl);
             return;
         }
 
-        const float = buildDownloadBlock(document.body, videoUrl);
-        float.classList.add('tiktok-rabbit-dl-float');
-        document.body.appendChild(float);
+        const dl = buildDownloadBlockVertical(control, videoUrl);
+        actionItem.insertAdjacentElement('afterend', dl);
     };
 
     const injectAll = () => {
+        if (isVideoDetailPage()) {
+            injectVideoDetailRow();
+            return;
+        }
         findBookmarkNodes().forEach(injectBesideBookmark);
-        injectVideoPageFallback();
     };
 
     const style = document.createElement('style');
     style.textContent = `
         .tiktok-rabbit-dl-wrap {
+            pointer-events: auto !important;
+            z-index: 10 !important;
+            flex-shrink: 0 !important;
+        }
+        .tiktok-rabbit-dl-vertical {
             display: flex !important;
             flex-direction: column !important;
             align-items: center !important;
@@ -666,45 +764,66 @@
             margin: 10px 0 !important;
             padding: 0 !important;
             min-width: 52px !important;
-            flex-shrink: 0 !important;
-            pointer-events: auto !important;
-            z-index: 10 !important;
+        }
+        .tiktok-rabbit-dl-inline {
+            display: inline-flex !important;
+            flex-direction: row !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            gap: 6px !important;
+            margin: 0 0 0 20px !important;
+            padding: 0 !important;
+            min-width: 0 !important;
+            vertical-align: middle !important;
         }
         .tiktok-rabbit-dl-wrap button {
-            width: 48px !important;
-            height: 48px !important;
-            min-width: 48px !important;
-            min-height: 48px !important;
             border-radius: 50% !important;
             border: none !important;
-            background: rgba(255, 255, 255, 0.18) !important;
+            background: rgba(255, 255, 255, 0.12) !important;
             color: #fff !important;
             display: flex !important;
             align-items: center !important;
             justify-content: center !important;
             cursor: pointer !important;
             padding: 0 !important;
+            flex-shrink: 0 !important;
+        }
+        .tiktok-rabbit-dl-vertical button {
+            width: 48px !important;
+            height: 48px !important;
+            min-width: 48px !important;
+            min-height: 48px !important;
             box-shadow: 0 2px 8px rgba(0,0,0,0.35) !important;
+        }
+        .tiktok-rabbit-dl-inline button {
+            width: 40px !important;
+            height: 40px !important;
+            min-width: 40px !important;
+            min-height: 40px !important;
         }
         .tiktok-rabbit-dl-wrap button:hover {
             background: rgba(254, 44, 85, 0.85) !important;
-            transform: scale(1.06);
+            transform: scale(1.05);
         }
-        .tiktok-rabbit-dl-wrap strong {
+        .tiktok-rabbit-dl-vertical strong {
             display: block !important;
             margin-top: 6px !important;
             color: #fff !important;
             font-size: 13px !important;
             font-weight: 600 !important;
-            line-height: 1.1 !important;
             text-align: center !important;
             text-shadow: 0 1px 2px rgba(0,0,0,0.8);
         }
-        .tiktok-rabbit-dl-float {
-            position: fixed !important;
-            right: 24px !important;
-            bottom: 120px !important;
-            z-index: 2147483646 !important;
+        .tiktok-rabbit-dl-inline strong,
+        .tiktok-rabbit-dl-inline span,
+        .tiktok-rabbit-dl-inline p {
+            margin: 0 !important;
+            padding: 0 !important;
+            color: #fff !important;
+            font-size: 15px !important;
+            font-weight: 600 !important;
+            line-height: 1.2 !important;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.8);
         }
     `;
     document.head.appendChild(style);
