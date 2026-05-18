@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         Instagram_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.3
+// @version      1.0.4
 // @description  Download posts, stories, highlights; native video controls with saved volume. AdGuard-ready.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.instagram.com/*
 // @grant        none
-// @run-at       document-idle
+// @run-at       document-start
 // @license      MIT
 // @downloadURL  https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Instagram_Rabbit.js
 // @updateURL    https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Instagram_Rabbit.js
@@ -17,117 +17,106 @@
     'use strict';
 
     const VOL_KEY = 'ig_rabbit_volume';
-    const enhanced = new WeakSet();
+    const volDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
+    const mutedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'muted');
+    const nativeAppend = Node.prototype.appendChild;
+    const nativeInsertBefore = Node.prototype.insertBefore;
+    const nativeReplaceChild = Node.prototype.replaceChild;
+    const wired = new WeakSet();
 
-    const readSavedVolume = () => {
+    const getVolume = () => {
         try {
             const raw = localStorage.getItem(VOL_KEY);
-            if (raw === null) return null;
+            if (raw === null) return 0;
             const v = parseFloat(raw);
-            return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null;
+            return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;
         } catch {
-            return null;
+            return 0;
         }
     };
 
-    const writeSavedVolume = (v) => {
+    const setVolume = (v) => {
         try {
-            localStorage.setItem(VOL_KEY, String(v));
+            localStorage.setItem(VOL_KEY, String(Math.min(1, Math.max(0, v))));
         } catch {}
     };
 
-    const enableNativeControls = (video) => {
-        if (!video.hasAttribute('controls')) video.setAttribute('controls', '');
-        if (!video.controls) video.controls = true;
-    };
-
-    const applySavedVolume = (video) => {
-        const saved = readSavedVolume();
-        if (saved === null) return;
-        try {
-            video.volume = saved;
-            if (saved > 0.01) video.muted = false;
-        } catch {}
-    };
-
-    const enhanceVideo = (video) => {
-        if (!video || video.tagName !== 'VIDEO' || enhanced.has(video)) return;
-        enhanced.add(video);
-
-        enableNativeControls(video);
-
-        const onVolumeChange = () => {
-            if (!video.muted) writeSavedVolume(video.volume);
-        };
-        video.addEventListener('volumechange', onVolumeChange, { passive: true });
-
-        const onReady = () => {
-            enableNativeControls(video);
-            applySavedVolume(video);
-        };
-
-        if (video.readyState >= 1) onReady();
-        else {
-            video.addEventListener('loadedmetadata', onReady, { once: true });
-            video.addEventListener('canplay', onReady, { once: true });
-        }
-
-        const attrObs = new MutationObserver(() => {
-            if (!video.isConnected) {
-                attrObs.disconnect();
-                return;
-            }
-            if (!video.controls) enableNativeControls(video);
-        });
-        attrObs.observe(video, {
-            attributes: true,
-            attributeFilter: ['controls', 'class', 'style', 'src'],
-        });
-    };
-
-    const scanVideos = (root) => {
-        if (!root || root.nodeType !== 1) return;
-        if (root.tagName === 'VIDEO') enhanceVideo(root);
-        root.querySelectorAll?.('video').forEach(enhanceVideo);
-    };
-
-    const injectStyles = () => {
-        if (document.getElementById('ig-rabbit-vc-style')) return;
-        const style = document.createElement('style');
-        style.id = 'ig-rabbit-vc-style';
-        style.textContent = `
-            video::-webkit-media-controls-enclosure,
-            video::-webkit-media-controls-panel {
-                display: flex !important;
-                opacity: 1 !important;
-                visibility: visible !important;
-            }
-            video[controls] {
-                cursor: pointer;
-            }
-        `;
-        (document.head || document.documentElement).appendChild(style);
-    };
-
-    injectStyles();
-
-    scanVideos(document);
-
-    const treeObs = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-            for (const node of m.addedNodes) {
-                if (node.nodeType === 1) scanVideos(node);
-            }
-        }
+    Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
+        get: volDesc.get,
+        set() {
+            return true;
+        },
     });
 
-    const observeTree = () => {
-        const target = document.body || document.documentElement;
-        if (target) treeObs.observe(target, { childList: true, subtree: true });
+    Object.defineProperty(HTMLMediaElement.prototype, 'muted', {
+        get: mutedDesc.get,
+        set() {
+            return true;
+        },
+    });
+
+    const wireVideo = (node) => {
+        if (!node || node.tagName !== 'VIDEO') return;
+
+        node.setAttribute('controls', true);
+
+        if (wired.has(node)) {
+            volDesc.set.call(node, getVolume());
+            return;
+        }
+        wired.add(node);
+
+        volDesc.set.call(node, getVolume());
+        node.addEventListener('pause', (ev) => ev.stopImmediatePropagation(), true);
+        node.addEventListener('play', () => volDesc.set.call(node, getVolume()), true);
+        node.addEventListener('volumechange', () => setVolume(node.volume), true);
     };
 
-    if (document.body) observeTree();
-    else document.addEventListener('DOMContentLoaded', observeTree, { once: true });
+    const patchTree = (root) => {
+        if (!root || root.nodeType !== 1) return;
+        if (root.tagName === 'VIDEO') wireVideo(root);
+        root.querySelectorAll?.('video').forEach(wireVideo);
+    };
+
+    Node.prototype.appendChild = function (node) {
+        const result = nativeAppend.call(this, node);
+        wireVideo(node);
+        patchTree(node);
+        return result;
+    };
+
+    Node.prototype.insertBefore = function (node, ref) {
+        const result = nativeInsertBefore.call(this, node, ref);
+        wireVideo(node);
+        patchTree(node);
+        return result;
+    };
+
+    Node.prototype.replaceChild = function (node, old) {
+        const result = nativeReplaceChild.call(this, node, old);
+        wireVideo(node);
+        patchTree(node);
+        return result;
+    };
+
+    (document.head || document.documentElement).insertAdjacentHTML(
+        'beforeend',
+        `<style id="ig-rabbit-vc-style">
+        video::-webkit-media-controls {
+            display: block !important;
+        }
+        [data-instancekey]:has([d^="M1.5 13"]) {
+            display: none !important;
+        }
+    </style>`
+    );
+
+    const lateScan = () => patchTree(document.documentElement);
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', lateScan, { once: true });
+    } else {
+        lateScan();
+    }
 })();
 
 (function () {
