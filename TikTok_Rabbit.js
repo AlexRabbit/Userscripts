@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.2.0
+// @version      1.3.0
 // @description  No-watermark TikTok download via TikWM; download button beside bookmark on FYP and video pages.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.tiktok.com/*
@@ -204,43 +204,79 @@
 
     const parseUniversalData = () => {
         const el = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
-        if (el?.textContent) return parseUniversalInText(el.textContent);
+        if (!el?.textContent) return null;
+        try {
+            const data = JSON.parse(el.textContent);
+            const detail = data?.__DEFAULT_SCOPE__?.['webapp.video-detail']?.itemInfo?.itemStruct;
+            if (detail?.id) {
+                const user = detail.author?.uniqueId || detail.author?.unique_id || 'user';
+                const kind = detail.imagePost ? 'photo' : 'video';
+                return normalizeUrl(`https://www.tiktok.com/@${user}/${kind}/${detail.id}`);
+            }
+        } catch {}
+        return parseUniversalInText(el.textContent);
+    };
+
+    const urlFromLocation = () => {
+        if (/\/(video|photo)\/\d+/.test(location.pathname)) {
+            return normalizeUrl(location.href);
+        }
+        const canonical = document.querySelector('link[rel="canonical"]')?.href;
+        if (canonical && /\/(video|photo)\/\d+/.test(canonical)) {
+            return normalizeUrl(canonical);
+        }
         return null;
     };
 
     const resolveVideoUrl = (root) => {
-        const scope =
-            root?.closest?.('[data-e2e="recommend-list-item-container"]') ||
-            root?.closest?.('[data-e2e="search-card-video-container"]') ||
-            root?.closest?.('[data-e2e="user-post-item"]') ||
-            root?.closest?.('[data-e2e="browse-video"]') ||
-            root?.closest?.('[data-e2e="video-detail"]') ||
-            root?.closest?.('article') ||
-            root?.closest?.('section') ||
-            root ||
-            document;
+        const onVideoPage = urlFromLocation();
+        if (onVideoPage) return onVideoPage;
 
-        const link = scope.querySelector?.('a[href*="/video/"], a[href*="/photo/"]');
-        if (link) {
-            const href = link.href || link.getAttribute('href') || '';
-            if (href) return normalizeUrl(href);
+        const containerSelectors = [
+            '[data-e2e="recommend-list-item-container"]',
+            '[data-e2e="one-column-item"]',
+            '[data-e2e="search-card-video-container"]',
+            '[data-e2e="user-post-item"]',
+            '[data-e2e="browse-video"]',
+            '[data-e2e="video-detail"]',
+        ];
+
+        let scope = null;
+        if (root && root.nodeType === 1) {
+            for (const sel of containerSelectors) {
+                const hit = root.closest?.(sel);
+                if (hit) {
+                    scope = hit;
+                    break;
+                }
+            }
+            if (!scope) {
+                scope =
+                    root.closest?.('[data-e2e="video-player"]') ||
+                    root.closest?.('section') ||
+                    root.closest?.('article') ||
+                    root;
+            }
         }
 
-        if (scope === document || !root) {
-            const canonical = document.querySelector('link[rel="canonical"]')?.href;
-            if (canonical && /\/(video|photo)\/\d+/.test(canonical)) return normalizeUrl(canonical);
-            if (/\/(video|photo)\/\d+/.test(location.href)) return normalizeUrl(location.href);
-            return parseUniversalData();
+        if (scope && scope !== document) {
+            const link = scope.querySelector?.('a[href*="/video/"], a[href*="/photo/"]');
+            if (link) {
+                const href = link.href || link.getAttribute('href') || '';
+                if (href) return normalizeUrl(href);
+            }
+            const vid = scope.querySelector?.('video');
+            if (vid) {
+                let walk = vid.parentElement;
+                for (let i = 0; i < 12 && walk; i++) {
+                    const a = walk.querySelector?.(':scope a[href*="/video/"], :scope a[href*="/photo/"]');
+                    if (a?.href) return normalizeUrl(a.href);
+                    walk = walk.parentElement;
+                }
+            }
         }
 
-        const vid = scope.querySelector?.('video');
-        if (vid) {
-            const near = vid.closest('motion-button, div')?.parentElement;
-            const a = near?.querySelector?.('a[href*="/video/"], a[href*="/photo/"]');
-            if (a?.href) return normalizeUrl(a.href);
-        }
-
-        return null;
+        return parseUniversalData() || urlFromLocation();
     };
 
     const parseTikwmEntry = (j, usernameFromUrl, videoIdFromUrl) => {
@@ -435,12 +471,23 @@
         setTimeout(() => box.remove(), 2800);
     };
 
-    const runDownload = async (contextRoot) => {
+    const runDownload = async (triggerEl) => {
         if (busy) return;
         busy = true;
         toast('Preparing download…');
         try {
-            const pageUrl = resolveVideoUrl(contextRoot);
+            const wrap =
+                triggerEl?.closest?.('[data-tiktok-rabbit-dl]') ||
+                (triggerEl?.hasAttribute?.('data-tiktok-rabbit-dl') ? triggerEl : null);
+            let pageUrl =
+                wrap?.getAttribute('data-video-url') ||
+                triggerEl?.getAttribute?.('data-video-url') ||
+                resolveVideoUrl(triggerEl) ||
+                urlFromLocation() ||
+                parseUniversalData();
+            if (pageUrl && !extractMediaId(pageUrl) && /^\d{10,}$/.test(pageUrl)) {
+                pageUrl = `https://www.tiktok.com/video/${pageUrl}`;
+            }
             if (!pageUrl || !extractMediaId(pageUrl)) {
                 toast('Video URL not found for this item', true);
                 return;
@@ -460,119 +507,212 @@
         }
     };
 
-    const downloadSvg = () => {
+    const downloadSvg = (px) => {
         const ns = 'http://www.w3.org/2000/svg';
         const svg = document.createElementNS(ns, 'svg');
         svg.setAttribute('viewBox', '0 0 24 24');
-        svg.setAttribute('width', '1em');
-        svg.setAttribute('height', '1em');
+        svg.setAttribute('width', String(px));
+        svg.setAttribute('height', String(px));
         svg.setAttribute('fill', 'currentColor');
         const p = document.createElementNS(ns, 'path');
-        p.setAttribute(
-            'd',
-            'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z'
-        );
+        p.setAttribute('d', 'M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z');
         svg.appendChild(p);
         return svg;
     };
 
-    const getCollectButton = (el) => el.closest('button') || (el.tagName === 'BUTTON' ? el : null);
+    const getCollectControl = (el) => {
+        if (!el) return null;
+        if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') return el;
+        return el.querySelector('button, [role="button"]') || el;
+    };
 
-    const isBookmarkButton = (btn) => {
-        if (!btn || btn.tagName !== 'BUTTON') return false;
-        const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-        if (
+    const isBookmarkNode = (el) => {
+        if (!el) return false;
+        const e2e = el.getAttribute('data-e2e') || el.closest('[data-e2e]')?.getAttribute('data-e2e') || '';
+        if (/collect|bookmark|favorite/i.test(e2e)) return true;
+        const control = getCollectControl(el);
+        const label = (control?.getAttribute('aria-label') || '').toLowerCase();
+        return (
             label.includes('favorite') ||
             label.includes('favourite') ||
             label.includes('bookmark') ||
-            label.includes('save video') ||
             label.includes('add to favorites')
-        ) {
-            return true;
-        }
-        const e2e =
-            btn.getAttribute('data-e2e') ||
-            btn.closest('[data-e2e]')?.getAttribute('data-e2e') ||
-            '';
-        return /collect|favorite/i.test(e2e);
+        );
     };
 
-    const getActionItem = (collectBtn) => {
-        let item = collectBtn.parentElement;
-        for (let i = 0; i < 8 && item; i++) {
+    const getActionItem = (control) => {
+        let item = control;
+        for (let i = 0; i < 14 && item; i++) {
             const parent = item.parentElement;
             if (!parent) break;
             const peers = [...parent.children].filter(
-                (c) => c.querySelector?.('button') || c.tagName === 'BUTTON'
+                (c) =>
+                    c.querySelector?.('button, [role="button"]') ||
+                    c.tagName === 'BUTTON' ||
+                    c.getAttribute?.('role') === 'button'
             );
-            if (peers.length >= 2) return item;
+            if (peers.length >= 2 && peers.includes(item)) return item;
+            const pe2e = parent.getAttribute?.('data-e2e') || '';
+            if (/actions|action-bar/i.test(pe2e)) return item;
             item = parent;
         }
-        return collectBtn.parentElement || collectBtn;
+        return control.parentElement || control;
     };
 
-    const findCollectButtons = () => {
+    const measureBtnSize = (refControl) => {
+        const refBtn =
+            refControl?.tagName === 'BUTTON' || refControl?.getAttribute?.('role') === 'button'
+                ? refControl
+                : refControl?.querySelector?.('button, [role="button"]') || refControl;
+        let size = 48;
+        try {
+            const r = refBtn?.getBoundingClientRect?.();
+            if (r?.width >= 28) size = Math.round(r.width);
+        } catch {}
+        return Math.max(48, Math.min(size, 56));
+    };
+
+    const buildDownloadBlock = (refControl, videoUrl) => {
+        const size = measureBtnSize(refControl);
+        const block = document.createElement('div');
+        block.setAttribute('data-tiktok-rabbit-dl', '1');
+        block.setAttribute('data-video-url', videoUrl || urlFromLocation() || '');
+        block.className = 'tiktok-rabbit-dl-wrap';
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.setAttribute('aria-label', 'Download video');
+        btn.setAttribute('title', 'Download without watermark');
+        btn.appendChild(downloadSvg(Math.round(size * 0.5)));
+        btn.addEventListener(
+            'click',
+            (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+                runDownload(block);
+            },
+            true
+        );
+
+        const label = document.createElement('strong');
+        label.textContent = 'Save';
+        label.setAttribute('data-e2e', 'rabbit-download-count');
+        block.append(btn, label);
+        return block;
+    };
+
+    const findBookmarkNodes = () => {
         const found = new Set();
         for (const sel of COLLECT_SELECTORS) {
-            document.querySelectorAll(sel).forEach((el) => {
-                const btn = getCollectButton(el);
-                if (btn) found.add(btn);
-            });
+            document.querySelectorAll(sel).forEach((el) => found.add(el));
         }
-        document.querySelectorAll('button').forEach((btn) => {
-            if (isBookmarkButton(btn)) found.add(btn);
+        document.querySelectorAll('[data-e2e]').forEach((el) => {
+            const e2e = el.getAttribute('data-e2e') || '';
+            if (/collect|bookmark/i.test(e2e)) found.add(el);
+        });
+        document.querySelectorAll('button, [role="button"]').forEach((el) => {
+            if (isBookmarkNode(el)) found.add(el);
         });
         return [...found];
     };
 
-    const injectBesideBookmark = (collectBtn) => {
-        const actionItem = getActionItem(collectBtn);
+    const injectBesideBookmark = (bookmarkNode) => {
+        const control = getCollectControl(bookmarkNode);
+        if (!control) return;
+        const actionItem = getActionItem(control);
         if (!actionItem?.parentElement) return;
-        if (actionItem.nextElementSibling?.getAttribute('data-tiktok-rabbit-dl')) return;
-        if (actionItem.getAttribute('data-tiktok-rabbit-dl')) return;
+        if (actionItem.nextElementSibling?.hasAttribute('data-tiktok-rabbit-dl')) return;
 
-        const wrap = actionItem.cloneNode(true);
-        wrap.setAttribute('data-tiktok-rabbit-dl', '1');
+        const videoUrl = resolveVideoUrl(control) || urlFromLocation() || '';
+        const dl = buildDownloadBlock(control, videoUrl);
+        actionItem.insertAdjacentElement('afterend', dl);
+    };
 
-        const countEl = wrap.querySelector('strong, [data-e2e*="count"]');
-        if (countEl) countEl.textContent = '';
+    const injectVideoPageFallback = () => {
+        if (!/\/(video|photo)\//.test(location.pathname)) return;
+        if (document.querySelector('[data-tiktok-rabbit-dl]')) return;
 
-        const btn = wrap.querySelector('button') || wrap;
-        if (btn.tagName === 'BUTTON' || btn.getAttribute('role') === 'button') {
-            btn.setAttribute('aria-label', 'Download video (TikTok_Rabbit)');
-            btn.setAttribute('title', 'Download without watermark');
-            btn.replaceChildren(downloadSvg());
-            btn.style.pointerEvents = 'auto';
-            btn.addEventListener(
-                'click',
-                (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    e.stopImmediatePropagation();
-                    runDownload(actionItem);
-                },
-                true
-            );
+        const bar =
+            document.querySelector('[data-e2e="video-player-actions"]') ||
+            document.querySelector('[data-e2e="browse-video-actions"]') ||
+            document.querySelector('[class*="ActionBar"]') ||
+            document.querySelector('section [class*="ActionBar"]');
+
+        const videoUrl = urlFromLocation() || parseUniversalData() || '';
+        if (bar) {
+            const dl = buildDownloadBlock(bar.firstElementChild || bar, videoUrl);
+            bar.appendChild(dl);
+            return;
         }
 
-        actionItem.insertAdjacentElement('afterend', wrap);
+        const float = buildDownloadBlock(document.body, videoUrl);
+        float.classList.add('tiktok-rabbit-dl-float');
+        document.body.appendChild(float);
     };
 
     const injectAll = () => {
-        findCollectButtons().forEach(injectBesideBookmark);
+        findBookmarkNodes().forEach(injectBesideBookmark);
+        injectVideoPageFallback();
     };
 
     const style = document.createElement('style');
     style.textContent = `
-        [data-${MARK}="1"] button { cursor: pointer !important; }
-        [data-${MARK}="1"] svg { color: #fff; }
+        .tiktok-rabbit-dl-wrap {
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            justify-content: center !important;
+            margin: 10px 0 !important;
+            padding: 0 !important;
+            min-width: 52px !important;
+            flex-shrink: 0 !important;
+            pointer-events: auto !important;
+            z-index: 10 !important;
+        }
+        .tiktok-rabbit-dl-wrap button {
+            width: 48px !important;
+            height: 48px !important;
+            min-width: 48px !important;
+            min-height: 48px !important;
+            border-radius: 50% !important;
+            border: none !important;
+            background: rgba(255, 255, 255, 0.18) !important;
+            color: #fff !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            cursor: pointer !important;
+            padding: 0 !important;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.35) !important;
+        }
+        .tiktok-rabbit-dl-wrap button:hover {
+            background: rgba(254, 44, 85, 0.85) !important;
+            transform: scale(1.06);
+        }
+        .tiktok-rabbit-dl-wrap strong {
+            display: block !important;
+            margin-top: 6px !important;
+            color: #fff !important;
+            font-size: 13px !important;
+            font-weight: 600 !important;
+            line-height: 1.1 !important;
+            text-align: center !important;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+        }
+        .tiktok-rabbit-dl-float {
+            position: fixed !important;
+            right: 24px !important;
+            bottom: 120px !important;
+            z-index: 2147483646 !important;
+        }
     `;
     document.head.appendChild(style);
 
     injectAll();
     const obs = new MutationObserver(() => injectAll());
     obs.observe(document.documentElement, { childList: true, subtree: true });
-    setInterval(injectAll, 1500);
+    setInterval(injectAll, 1200);
 })();
 
 /*
