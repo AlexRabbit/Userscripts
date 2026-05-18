@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.5
+// @version      1.0.6
 // @description  Download posts, stories, highlights; native video controls with saved volume. AdGuard-ready.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.instagram.com/*
@@ -19,25 +19,22 @@
     const VOL_KEY = 'ig_rabbit_volume';
     const volDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
     const mutedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'muted');
-    const nativeAppend = Node.prototype.appendChild;
-    const nativeInsertBefore = Node.prototype.insertBefore;
-    const nativeReplaceChild = Node.prototype.replaceChild;
-    const wired = new WeakSet();
+    const append = Node.prototype.appendChild;
 
     const getVolume = () => {
         try {
             const raw = localStorage.getItem(VOL_KEY);
             if (raw === null) return 0;
             const v = parseFloat(raw);
-            return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;
+            return Number.isFinite(v) ? v : 0;
         } catch {
             return 0;
         }
     };
 
-    const setVolume = (v) => {
+    const setStoredVolume = (v) => {
         try {
-            localStorage.setItem(VOL_KEY, String(Math.min(1, Math.max(0, v))));
+            localStorage.setItem(VOL_KEY, String(v));
         } catch {}
     };
 
@@ -55,92 +52,18 @@
         },
     });
 
-    const showNativeControls = (node) => {
-        node.setAttribute('controls', '');
-        node.controls = true;
-        try {
-            if (node.controlsList?.remove) {
-                node.controlsList.remove('nodownload', 'nofullscreen', 'noremoteplayback');
-            }
-        } catch {}
-    };
-
-    const hideIgOverlayNear = (video) => {
-        let el = video.parentElement;
-        for (let i = 0; i < 12 && el; i++) {
-            el.querySelectorAll('div[data-instancekey]').forEach((layer) => {
-                if (layer.querySelector('svg path[d]')) {
-                    layer.style.setProperty('display', 'none', 'important');
-                    layer.style.setProperty('pointer-events', 'none', 'important');
-                }
-            });
-            el = el.parentElement;
-        }
-    };
-
-    const wireVideo = (node) => {
+    const onVideoMounted = (node) => {
         if (!node || node.tagName !== 'VIDEO') return;
-
-        showNativeControls(node);
-        hideIgOverlayNear(node);
-
-        const reapply = () => {
-            if (!node.isConnected) return;
-            showNativeControls(node);
-            hideIgOverlayNear(node);
-        };
-        requestAnimationFrame(reapply);
-        setTimeout(reapply, 0);
-        setTimeout(reapply, 250);
-
-        if (wired.has(node)) {
-            volDesc.set.call(node, getVolume());
-            return;
-        }
-        wired.add(node);
-
+        node.setAttribute('controls', '');
         volDesc.set.call(node, getVolume());
         node.addEventListener('pause', (ev) => ev.stopImmediatePropagation(), true);
         node.addEventListener('play', () => volDesc.set.call(node, getVolume()), true);
-        node.addEventListener('volumechange', () => setVolume(node.volume), true);
-
-        node.addEventListener('loadeddata', reapply, { passive: true });
-        node.addEventListener('canplay', reapply, { passive: true });
-
-        const ctrlObs = new MutationObserver(() => {
-            if (!node.isConnected) {
-                ctrlObs.disconnect();
-                return;
-            }
-            if (!node.hasAttribute('controls') || !node.controls) showNativeControls(node);
-        });
-        ctrlObs.observe(node, { attributes: true, attributeFilter: ['controls'] });
-    };
-
-    const patchTree = (root) => {
-        if (!root || root.nodeType !== 1) return;
-        if (root.tagName === 'VIDEO') wireVideo(root);
-        root.querySelectorAll?.('video').forEach(wireVideo);
+        node.addEventListener('volumechange', () => setStoredVolume(node.volume), true);
     };
 
     Node.prototype.appendChild = function (node) {
-        const result = nativeAppend.call(this, node);
-        wireVideo(node);
-        patchTree(node);
-        return result;
-    };
-
-    Node.prototype.insertBefore = function (node, ref) {
-        const result = nativeInsertBefore.call(this, node, ref);
-        wireVideo(node);
-        patchTree(node);
-        return result;
-    };
-
-    Node.prototype.replaceChild = function (node, old) {
-        const result = nativeReplaceChild.call(this, node, old);
-        wireVideo(node);
-        patchTree(node);
+        const result = append.call(this, node);
+        onVideoMounted(node);
         return result;
     };
 
@@ -150,35 +73,11 @@
         video::-webkit-media-controls {
             display: block !important;
         }
-        video[controls]::-webkit-media-controls-enclosure,
-        video[controls]::-webkit-media-controls-panel {
-            display: flex !important;
-            opacity: 1 !important;
-            visibility: visible !important;
-        }
-        video[controls] {
-            position: relative !important;
-            z-index: 2 !important;
-        }
-        [data-instancekey]:has([d^="M1.5 13"]),
-        [data-instancekey]:has(path[d^="M1.5 13"]),
-        [data-instancekey]:has(path[d^="M5.888"]),
-        [data-instancekey]:has(path[d*="M5.888 22.5"]),
-        div[data-instancekey]:has(svg path[d]) {
+        [data-instancekey]:has([d^="M1.5 13"]) {
             display: none !important;
-            pointer-events: none !important;
         }
     </style>`
     );
-
-    const lateScan = () => patchTree(document.documentElement);
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', lateScan, { once: true });
-    } else {
-        lateScan();
-    }
-
-    setInterval(lateScan, 2000);
 })();
 
 (function () {
