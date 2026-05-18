@@ -20,7 +20,7 @@ AdGuard is pickier than Tampermonkey: prefer scripts with **`@grant none`** and 
 | **All websites** | **Global_Rabbit** | Right‑click restored where blocked; contextmenu only (does not break buttons) | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Global_Rabbit.js) |
 | **Instagram** | **Instagram_Rabbit** | Ultimate video controls (seek, speed, PiP, keyboard), downloads (posts/stories), overlay unlock | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Instagram_Rabbit.js) |
 | **News & magazines** (169 domains) | **Paywall_Rabbit** | DOM paywall bypass (NYT, WaPo, Economist, Bloomberg, …) | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Paywall_Rabbit.js) |
-| **simpcity.cr** | **Forum_Rabbit** | Media assistant, auto-redirect, thumbs, bulk thread download | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Forum_Rabbit.js) |
+| **simpcity.cr** | **Forum_Rabbit** | Thread gallery (SIMP), scan images/videos/links, GM_download, URL export, redirect bypass | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Forum_Rabbit.js) |
 | **Telegram Web** | **Telegram_Rabbit** | Hide sponsored UI; download viewer media (serial saves) | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Telegram_Rabbit.js) |
 | **TikTok** | **TikTok_Rabbit** | No‑watermark download via TikWM; **download** button beside bookmark (FYP + video) | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/TikTok_Rabbit.js) |
 
