@@ -13,18 +13,10 @@
 // @supportURL   https://github.com/AlexRabbit/Userscripts/issues
 // ==/UserScript==
 
-/**
- * Merged & improved from:
- * - Enable Right Click (AlexRabbit)
- * - Unlock Website Limit (SN-Koarashi / GreasyFork #404665)
- *
- * AdGuard note: @grant none + capture-phase listeners — no GM APIs required.
- */
 
 (function () {
     'use strict';
 
-    // --- Right-click: stop sites from swallowing contextmenu (capture phase) ---
     document.addEventListener(
         'contextmenu',
         (e) => {
@@ -33,7 +25,6 @@
         true
     );
 
-    // --- Neutralize preventDefault on copy / selection / contextmenu ---
     const nativePreventDefault = Event.prototype.preventDefault;
     const protectedTypes = new Set([
         'contextmenu',
@@ -73,7 +64,7 @@
                 const doc = node.contentWindow?.document;
                 if (doc) unBlockNode(doc.documentElement || doc, eventName);
             } catch {
-                /* cross-origin */
+
             }
         }
     }

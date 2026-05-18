@@ -26,36 +26,6 @@
 (function () {
   'use strict';
 
-  
-  /*!
-  * Copyright (c) 2026 - 2026, Nestor Qin, Andrew. All rights reserved.
-  *
-  * Permission is hereby granted, free of charge, to any person obtaining a copy
-  * of this software and associated documentation files (the "Software"), to deal
-  * in the Software without restriction, including without limitation the rights
-  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-  * copies of the Software, and to permit persons to whom the Software is
-  * furnished to do so, subject to the following conditions:
-  *
-  * The above copyright notice and this permission notice shall be included in
-  * all copies or substantial portions of the Software.
-  *
-  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-  *
-  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-  * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-  * SOFTWARE.
-  *
-  * The code is adapted from an open-source project. 
-  * The code structure has been optimized and bugs have been fixed. 
-  * Copyright belongs to the original author.
-  * https://github.com/Neet-Nestor/Telegram-Media-Downloader
-  */
-
-
   const CONFIG = {
     downloadIcon: "",
     forwardIcon: "",
@@ -82,7 +52,7 @@
       return hash >>> 0;
     },
     randomId() {
-      return `${Math.random().toString(36).slice(2)}_${Date.now()}`;
+      return `$Math.random().toString(36).slice(2)}_$Date.now()}`;
     },
     triggerBlobDownload(blob, fileName) {
       const blobUrl = window.URL.createObjectURL(blob);
@@ -117,7 +87,7 @@
       this.progress = progress;
     }
     downloadImage(url) {
-      const fileName = `${Math.random().toString(36).slice(2, 10)}.jpeg`;
+      const fileName = `$Math.random().toString(36).slice(2, 10)}.jpeg`;
       const a = document.createElement("a");
       document.body.appendChild(a);
       a.href = url;
@@ -126,7 +96,7 @@
       document.body.removeChild(a);
     }
     downloadAudio(url) {
-      const fileName = `${utils.hashCode(url).toString(36)}.ogg`;
+      const fileName = `$utils.hashCode(url).toString(36)}.ogg`;
       const context = { nextOffset: 0, totalSize: null, chunks: [] };
       this.downloadStream({
         url,
@@ -144,13 +114,13 @@
         extension: "mp4",
         fileName: utils.parseMediaFileName(
           url,
-          `${utils.hashCode(url).toString(36)}.mp4`
+          `$utils.hashCode(url).toString(36)}.mp4`
         )
       };
       this.progress.ensure(taskId, context.fileName);
       const onChunkMeta = ({ mime, percent }) => {
         context.extension = mime.split("/")[1] || context.extension;
-        context.fileName = `${context.fileName.split(".")[0]}.${context.extension}`;
+        context.fileName = `$context.fileName.split(".")[0]}.$context.extension}`;
         this.progress.update(taskId, context.fileName, percent, url);
       };
       this.downloadStream({
@@ -186,14 +156,14 @@
       const readNext = (writer) => {
         fetch(url, {
           method: "GET",
-          headers: { Range: `bytes=${context.nextOffset}-` }
+          headers: { Range: `bytes=$context.nextOffset}-` }
         }).then((res) => {
           if (![200, 206].includes(res.status)) {
-            throw new Error(`Unexpected response: ${res.status}`);
+            throw new Error(`Unexpected response: $res.status}`);
           }
           const mime = (res.headers.get("Content-Type") || "").split(";")[0];
           if (!mime.startsWith(mimePrefix)) {
-            throw new Error(`Unexpected MIME: ${mime}`);
+            throw new Error(`Unexpected MIME: $mime}`);
           }
           const range = res.headers.get("Content-Range");
           const match = range && range.match(CONFIG.contentRangeRegex);
@@ -225,7 +195,7 @@
             return;
           }
           const finalName = context.fileName || fileName;
-          const finalType = mimePrefix === "video/" ? `video/${context.extension || "mp4"}` : fallbackType;
+          const finalType = mimePrefix === "video/" ? `video/$context.extension || "mp4"}` : fallbackType;
           if (writer) {
             writer.close();
           } else {
@@ -274,7 +244,7 @@
       return document.getElementById(CONFIG.progressContainerId);
     }
     getCard(taskId) {
-      return document.getElementById(`${CONFIG.progressCardPrefix}${taskId}`);
+      return document.getElementById(`$CONFIG.progressCardPrefix}$taskId}`);
     }
     getActiveCount() {
       const container = this.getContainer();
@@ -301,7 +271,7 @@
     createCard(taskId, fileName) {
       const isDarkMode = document.documentElement.classList.contains("night") || document.documentElement.classList.contains("theme-dark");
       const card = document.createElement("div");
-      card.id = `${CONFIG.progressCardPrefix}${taskId}`;
+      card.id = `$CONFIG.progressCardPrefix}$taskId}`;
       card.className = "tel-downloader-progress";
       card.setAttribute("videoId", taskId);
       card.style.width = "20rem";
@@ -373,8 +343,8 @@
       if (!title || !progressBar)
         return;
       title.innerText = fileName;
-      progressBar.querySelector("p").innerText = `${percent}%`;
-      progressBar.querySelector("div").style.width = `${percent}%`;
+      progressBar.querySelector("p").innerText = `$percent}%`;
+      progressBar.querySelector("div").style.width = `$percent}%`;
       progressBar.setAttribute("data-tel-media-url", mediaUrl);
     }
     complete(taskId) {
@@ -561,7 +531,7 @@
       const createBtn = () => {
         const btn = document.createElement("button");
         btn.className = "btn-icon rp tel-download";
-        btn.innerHTML = `<span class="tgico">${CONFIG.downloadIcon}</span><div class="c-ripple"></div>`;
+        btn.innerHTML = `<span class="tgico">$CONFIG.downloadIcon}</span><div class="c-ripple"></div>`;
         btn.type = "button";
         btn.title = "Download";
         btn.ariaLabel = "Download";
@@ -610,7 +580,7 @@
       const createKButton = (className = "btn-icon tgico-download tel-download") => {
         const btn = document.createElement("button");
         btn.className = className;
-        btn.innerHTML = `<span class="tgico button-icon">${CONFIG.downloadIcon}</span>`;
+        btn.innerHTML = `<span class="tgico button-icon">$CONFIG.downloadIcon}</span>`;
         btn.type = "button";
         btn.title = "Download";
         btn.ariaLabel = "Download";
@@ -649,7 +619,7 @@
         return;
       const button = document.querySelector("._tel_download_button_pinned_container") || document.createElement("button");
       button.className = "btn-icon tgico-download _tel_download_button_pinned_container";
-      button.innerHTML = `<span class="tgico button-icon">${CONFIG.downloadIcon}</span>`;
+      button.innerHTML = `<span class="tgico button-icon">$CONFIG.downloadIcon}</span>`;
       Array.from(document.querySelectorAll("audio-element")).forEach((voice) => {
         if (voice.getAttribute("data-mid") !== dataMid)
           return;

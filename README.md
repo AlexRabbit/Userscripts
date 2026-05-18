@@ -28,6 +28,7 @@ Personal, curated userscripts — **one script per site** (or site family), tune
 | **Instagram** | **Instagram_Rabbit** | Video controls + download buttons + removes copy blockers. | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Instagram_Rabbit.js) |
 | **News & magazines** (NYT, WSJ, Economist, …) | **News_Rabbit** | Bypasses paywalls on 160+ news domains. | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/News_Rabbit.js) |
 | **Telegram Web** (A / K / Z) | **Telegram_Rabbit** | Hides sponsored messages + download restricted channel media. | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Telegram_Rabbit.js) |
+| **TikTok** | **TikTok_Rabbit** | Download button next to Bookmark (For You, video pages, carousel). TikWM, no watermark, slideshow + cache + batch. | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/TikTok_Rabbit.js) |
  
 
 ---
