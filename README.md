@@ -29,10 +29,10 @@ AdGuard is pickier than Tampermonkey: prefer scripts with **`@grant none`** and 
 
 ## 🔐 TikTok private / friends-only
 
-In the browser console on `tiktok.com`:
+In the browser console on `tiktok.com`: Line 29
 
 ```js
-localStorage.setItem('tiktok_rabbit_sessionid', 'YOUR_SESSIONID');
+    const SESSION_KEY = 'tiktok_rabbit_sessionid';
 ```
 
 Same idea as [Ez-TikTok-Downloader](https://github.com/AlexRabbit/Ez-TikTok-Downloader). Clear the key to stop sending it.
