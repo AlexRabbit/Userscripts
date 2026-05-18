@@ -1,3 +1,6 @@
+If this helped you, consider starring the repo ⭐
+
+
 # 🐰 Userscripts
 
 Tuned for **[AdGuard for Windows](https://adguard.com/kb/general/extensions/)** first; works in Tampermonkey too.
