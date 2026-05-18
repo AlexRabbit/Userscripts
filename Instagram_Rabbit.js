@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.4
+// @version      1.0.5
 // @description  Download posts, stories, highlights; native video controls with saved volume. AdGuard-ready.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.instagram.com/*
@@ -55,10 +55,43 @@
         },
     });
 
+    const showNativeControls = (node) => {
+        node.setAttribute('controls', '');
+        node.controls = true;
+        try {
+            if (node.controlsList?.remove) {
+                node.controlsList.remove('nodownload', 'nofullscreen', 'noremoteplayback');
+            }
+        } catch {}
+    };
+
+    const hideIgOverlayNear = (video) => {
+        let el = video.parentElement;
+        for (let i = 0; i < 12 && el; i++) {
+            el.querySelectorAll('div[data-instancekey]').forEach((layer) => {
+                if (layer.querySelector('svg path[d]')) {
+                    layer.style.setProperty('display', 'none', 'important');
+                    layer.style.setProperty('pointer-events', 'none', 'important');
+                }
+            });
+            el = el.parentElement;
+        }
+    };
+
     const wireVideo = (node) => {
         if (!node || node.tagName !== 'VIDEO') return;
 
-        node.setAttribute('controls', true);
+        showNativeControls(node);
+        hideIgOverlayNear(node);
+
+        const reapply = () => {
+            if (!node.isConnected) return;
+            showNativeControls(node);
+            hideIgOverlayNear(node);
+        };
+        requestAnimationFrame(reapply);
+        setTimeout(reapply, 0);
+        setTimeout(reapply, 250);
 
         if (wired.has(node)) {
             volDesc.set.call(node, getVolume());
@@ -70,6 +103,18 @@
         node.addEventListener('pause', (ev) => ev.stopImmediatePropagation(), true);
         node.addEventListener('play', () => volDesc.set.call(node, getVolume()), true);
         node.addEventListener('volumechange', () => setVolume(node.volume), true);
+
+        node.addEventListener('loadeddata', reapply, { passive: true });
+        node.addEventListener('canplay', reapply, { passive: true });
+
+        const ctrlObs = new MutationObserver(() => {
+            if (!node.isConnected) {
+                ctrlObs.disconnect();
+                return;
+            }
+            if (!node.hasAttribute('controls') || !node.controls) showNativeControls(node);
+        });
+        ctrlObs.observe(node, { attributes: true, attributeFilter: ['controls'] });
     };
 
     const patchTree = (root) => {
@@ -105,8 +150,23 @@
         video::-webkit-media-controls {
             display: block !important;
         }
-        [data-instancekey]:has([d^="M1.5 13"]) {
+        video[controls]::-webkit-media-controls-enclosure,
+        video[controls]::-webkit-media-controls-panel {
+            display: flex !important;
+            opacity: 1 !important;
+            visibility: visible !important;
+        }
+        video[controls] {
+            position: relative !important;
+            z-index: 2 !important;
+        }
+        [data-instancekey]:has([d^="M1.5 13"]),
+        [data-instancekey]:has(path[d^="M1.5 13"]),
+        [data-instancekey]:has(path[d^="M5.888"]),
+        [data-instancekey]:has(path[d*="M5.888 22.5"]),
+        div[data-instancekey]:has(svg path[d]) {
             display: none !important;
+            pointer-events: none !important;
         }
     </style>`
     );
@@ -117,6 +177,8 @@
     } else {
         lateScan();
     }
+
+    setInterval(lateScan, 2000);
 })();
 
 (function () {
