@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TikTok_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @run-at       document-end
-// @version      1.1.0
+// @run-at       document-idle
+// @version      1.2.0
 // @description  One-click TikTok download (no watermark) via TikWM — video, slideshow, cache, private videos. Port of Ez-TikTok-Downloader.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.tiktok.com/*
@@ -30,6 +30,13 @@
 
 (function () {
     'use strict';
+
+    if (typeof globalThis.GM_registerMenuCommand !== 'function') {
+        globalThis.GM_registerMenuCommand = () => {};
+    }
+    if (typeof globalThis.GM_notification !== 'function') {
+        globalThis.GM_notification = () => {};
+    }
 
     if (typeof globalThis.GM_getValue !== 'function') {
         const PREFIX = 'AR_GM_';
@@ -75,13 +82,17 @@
         '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>';
 
     const AR_CSS = `
-        .ar-tt-action{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:48px;flex-shrink:0;position:relative;z-index:12;pointer-events:auto;-webkit-tap-highlight-color:transparent}
-        .ar-tt-action-btn{width:48px;height:48px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background .15s,transform .1s;pointer-events:auto}
+        [data-ar-tiktok-download]{display:flex!important;flex-direction:column!important;align-items:center!important;justify-content:center!important;flex-shrink:0!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;position:relative!important;z-index:20!important}
+        .ar-tt-action{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-width:48px;flex-shrink:0;position:relative;z-index:20;pointer-events:auto;-webkit-tap-highlight-color:transparent}
+        .ar-tt-action-btn{width:48px;height:48px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background .15s,transform .1s;pointer-events:auto;box-sizing:border-box}
         .ar-tt-action-btn:hover{background:rgba(255,255,255,.22)}
         .ar-tt-action-btn:active{transform:scale(.94)}
         .ar-tt-action-btn.is-busy{opacity:.55;pointer-events:none}
-        .ar-tt-action-btn svg{width:22px;height:22px;pointer-events:none}
-        .ar-tt-action-label{color:#fff;font-size:12px;font-weight:600;line-height:1.2;font-family:TikTokFont,Arial,sans-serif;text-shadow:0 1px 2px rgba(0,0,0,.4);pointer-events:none}
+        .ar-tt-action-btn svg{width:24px;height:24px;pointer-events:none;display:block}
+        .ar-tt-action-label{color:#fff;font-size:12px;font-weight:600;line-height:1.2;font-family:TikTokFont,Arial,sans-serif;text-shadow:0 1px 2px rgba(0,0,0,.4);pointer-events:none;user-select:none}
+        #ar-tt-floating-dl{position:fixed;right:72px;bottom:calc(50% - 88px);z-index:2147483645;display:flex;flex-direction:column;align-items:center;gap:4px;border:none;background:transparent;padding:0;cursor:pointer;font:inherit;color:#fff;filter:drop-shadow(0 2px 6px rgba(0,0,0,.55))}
+        #ar-tt-floating-dl .ar-tt-action-btn{background:rgba(254,44,85,.92)}
+        #ar-tt-floating-dl .ar-tt-action-label{font-size:11px}
         .ar-tt-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2147483646;background:rgba(37,37,37,.94);color:#fff;padding:10px 18px;border-radius:8px;font:600 14px/1.3 TikTokFont,Arial,sans-serif;box-shadow:0 4px 24px rgba(0,0,0,.45);pointer-events:none;opacity:0;transition:opacity .2s}
         .ar-tt-toast.show{opacity:1}
     `;
@@ -312,11 +323,15 @@
         return fromEl || document;
     }
 
+    function isVideoDetailPage() {
+        return /\/@[^/]+\/(video|photo)\/\d+/.test(location.pathname);
+    }
+
     async function getCurrentVideoUrl(scopeEl) {
-        const root = scopeEl ? findVideoScope(scopeEl) : document;
-        if (!scopeEl && /\/(video|photo)\/\d+/.test(location.pathname)) {
-            return normalizeUrl(location.href);
+        if (isVideoDetailPage()) {
+            return normalizeUrl(location.href.split('?')[0]);
         }
+        const root = scopeEl ? findVideoScope(scopeEl) : document;
         const links = root.querySelectorAll?.(
             'a[href*="/video/"], a[href*="/photo/"]'
         );
@@ -562,16 +577,6 @@
         }
     }
 
-    function actionItemRoot(btn) {
-        return (
-            btn.closest('[data-e2e="browse-video-actions"]') ||
-            btn.closest('[class*="ActionBar"]') ||
-            btn.closest('[class*="action-bar"]') ||
-            btn.parentElement?.parentElement?.parentElement ||
-            btn.parentElement?.parentElement
-        );
-    }
-
     function findFavoriteButtons() {
         const found = new Set();
         const patterns = [
@@ -591,23 +596,66 @@
         return [...found];
     }
 
-    function buildDownloadAction(scopeEl) {
+    function findShareButtonNear(favBtn) {
+        let node = favBtn.parentElement;
+        for (let i = 0; i < 12 && node; i++) {
+            const share = node.querySelector?.(
+                'button[aria-label^="Share"], button[aria-label*="Share video"]'
+            );
+            if (share && share !== favBtn) return share;
+            node = node.parentElement;
+        }
+        return null;
+    }
+
+    function actionMount(btn) {
+        return (
+            btn.closest('[data-e2e="browse-video-actions"] > *') ||
+            btn.closest('motion.div') ||
+            btn.parentElement
+        );
+    }
+
+    function findActionColumn(favBtn) {
+        const favMount = actionMount(favBtn);
+        if (!favMount?.parentElement) return null;
+        let col = favMount.parentElement;
+        for (let i = 0; i < 6 && col; i++) {
+            const share = findShareButtonNear(favBtn);
+            const shareMount = share ? actionMount(share) : null;
+            if (shareMount && col.contains(favMount) && col.contains(shareMount)) {
+                return col;
+            }
+            col = col.parentElement;
+        }
+        return favMount.parentElement;
+    }
+
+    function wireDownloadButton(btn) {
+        btn.type = 'button';
+        btn.setAttribute('aria-label', 'Download video (TikTok_Rabbit)');
+        btn.classList.add('ar-tt-action-btn');
+        btn.innerHTML = DL_ICON;
+        btn.addEventListener(
+            'click',
+            (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+                runDownload(btn);
+            },
+            true
+        );
+    }
+
+    function buildDownloadAction() {
         const wrap = document.createElement('motion.div');
         wrap.className = 'ar-tt-action';
         wrap.setAttribute('data-ar-tiktok-download', '1');
-        if (scopeEl) wrap.setAttribute('data-ar-tt-scope', '1');
+        wrap.setAttribute('data-ar-tt-scope', '1');
 
         const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'ar-tt-action-btn';
-        btn.setAttribute('aria-label', 'Download video (TikTok_Rabbit)');
-        btn.innerHTML = DL_ICON;
-        btn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            runDownload(btn);
-        }, true);
+        wireDownloadButton(btn);
 
         const label = document.createElement('span');
         label.className = 'ar-tt-action-label';
@@ -618,53 +666,111 @@
         return wrap;
     }
 
-    function injectBesideFavorite(favBtn) {
-        const bar = actionItemRoot(favBtn);
-        if (!bar || bar.querySelector('[data-ar-tiktok-download]')) return;
+    function cloneDownloadFromFavorite(favBtn) {
+        const favMount = actionMount(favBtn);
+        if (!favMount?.parentElement) return null;
 
-        const scope = findVideoScope(favBtn);
-        const dl = buildDownloadAction(scope);
+        const column = findActionColumn(favBtn);
+        if (!column) return null;
 
-        const shareBtn = bar.querySelector(
-            'button[aria-label^="Share"], button[aria-label*="Share video"]'
-        );
-        const favWrap =
-            favBtn.closest('motion.div') ||
-            favBtn.parentElement;
-
-        if (shareBtn) {
-            const shareWrap =
-                shareBtn.closest('motion.div') || shareBtn.parentElement;
-            if (shareWrap?.parentElement === bar) {
-                bar.insertBefore(dl, shareWrap);
-                return;
+        let cursor = favMount.nextElementSibling;
+        while (cursor) {
+            if (cursor.matches?.('[data-ar-tiktok-download]')) {
+                favBtn.dataset.arTtHooked = '1';
+                return cursor;
             }
-            if (favWrap?.parentElement === bar) {
-                bar.insertBefore(dl, favWrap.nextSibling);
-                return;
+            const shareBtn = cursor.querySelector?.(
+                'button[aria-label^="Share"], button[aria-label*="Share video"]'
+            );
+            if (shareBtn) break;
+            cursor = cursor.nextElementSibling;
+        }
+
+        let shell;
+        try {
+            shell = favMount.cloneNode(true);
+        } catch {
+            shell = null;
+        }
+
+        if (shell) {
+            shell.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
+            shell.removeAttribute('data-e2e');
+            shell.setAttribute('data-ar-tiktok-download', '1');
+            shell.setAttribute('data-ar-tt-scope', '1');
+            const innerBtn = shell.querySelector('button');
+            const label = shell.querySelector('strong, span, p');
+            if (innerBtn) {
+                wireDownloadButton(innerBtn);
+                if (label) label.textContent = 'DL';
+                favMount.insertAdjacentElement('afterend', shell);
+                favBtn.dataset.arTtHooked = '1';
+                return shell;
             }
         }
-        if (favWrap?.parentElement) {
-            favWrap.parentElement.insertBefore(dl, favWrap.nextSibling);
+
+        const dl = buildDownloadAction();
+        const shareBtn = findShareButtonNear(favBtn);
+        const shareMount = shareBtn ? actionMount(shareBtn) : null;
+        if (shareMount?.parentElement === column) {
+            column.insertBefore(dl, shareMount);
         } else {
-            bar.appendChild(dl);
+            favMount.insertAdjacentElement('afterend', dl);
         }
+        favBtn.dataset.arTtHooked = '1';
+        return dl;
+    }
+
+    function injectBesideFavorite(favBtn) {
+        if (favBtn.dataset.arTtHooked === '1') return;
+        cloneDownloadFromFavorite(favBtn);
+    }
+
+    function hasInlineDownloadButton() {
+        return !!document.querySelector(
+            '[data-ar-tiktok-download]:not(#ar-tt-floating-dl)'
+        );
+    }
+
+    function ensureFloatingDownload() {
+        if (!isVideoDetailPage()) return;
+        if (hasInlineDownloadButton()) return;
+        if (document.getElementById('ar-tt-floating-dl')) return;
+
+        const fav = findFavoriteButtons()[0];
+        if (!fav) return;
+
+        const host = document.createElement('div');
+        host.id = 'ar-tt-floating-dl';
+        host.setAttribute('data-ar-tiktok-download', '1');
+        host.setAttribute('data-ar-tt-scope', '1');
+        host.setAttribute('title', 'Download (TikTok_Rabbit)');
+
+        const btn = document.createElement('button');
+        wireDownloadButton(btn);
+        const label = document.createElement('span');
+        label.className = 'ar-tt-action-label';
+        label.textContent = 'DL';
+        host.appendChild(btn);
+        host.appendChild(label);
+        document.body.appendChild(host);
     }
 
     function injectDownloadButtons() {
-        const favorites = findFavoriteButtons();
-        if (favorites.length === 0) return;
-        favorites.forEach(injectBesideFavorite);
+        findFavoriteButtons().forEach(injectBesideFavorite);
     }
 
     function observeUi() {
-        const tick = () => injectDownloadButtons();
+        const tick = () => {
+            injectDownloadButtons();
+            ensureFloatingDownload();
+        };
         tick();
-        setInterval(tick, 1200);
+        setInterval(tick, 1000);
         let debounce;
         const obs = new MutationObserver(() => {
             clearTimeout(debounce);
-            debounce = setTimeout(tick, 300);
+            debounce = setTimeout(tick, 250);
         });
         if (document.body) {
             obs.observe(document.body, { childList: true, subtree: true });
