@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Forum_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Download images and media from forum posts (Simpcity, etc.).
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://simpcity.cr/threads/*

@@ -2,7 +2,7 @@
 // @name         Global_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
 // @version      2.0.0
-// @description  Restore right-click, copy, cut, text selection, and drag on sites that block them. Works in AdGuard and Tampermonkey.
+// @description  Restore right-click, copy, cut, text selection, and drag on sites that block them. AdGuard-ready.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        *://*/*
 // @grant        none
@@ -132,7 +132,6 @@
 
 /*
 Credits — modified by AlexRabbit (https://github.com/AlexRabbit)
-  - AlexRabbit — Global_Rabbit base
-  - Greasy Fork #476010 — Fix Post Right Click (inspiration)
-  - Greasy Fork #404665 — Unlock Website Limit (inspiration)
+  - SN-Koarashi (5026) — Unlock Website Limit (Greasy Fork 404665)
+  - naviamold1 — Fix Post Right Click (476010, Instagram overlay patterns)
 */

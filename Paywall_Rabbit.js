@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Paywall_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Bypass paywalls on major news sites (DOM). Works in AdGuard and Tampermonkey.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        *://*.adweek.com/*

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Telegram_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Telegram Web: hide ads, download photos/videos/audio from viewer (serial saves, no ZIP).
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://web.telegram.org/*
@@ -37,7 +37,6 @@
       );
     },
   };
-  // https://github.com/morethanwords/tweb/blob/master/src/icons.ts
   const DOWNLOAD_ICON = "";
   const FORWARD_ICON = "";
   const contentRangeRegex = /^bytes (\d+)-(\d+)\/(\d+)$/;
