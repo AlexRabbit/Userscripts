@@ -20,7 +20,7 @@ AdGuard is pickier than Tampermonkey: prefer scripts with **`@grant none`** and 
 
 | Site | Script | What it does | Install |
 |------|--------|--------------|---------|
-| **All websites** | **Global_Rabbit** | Right‑click, copy, cut, select, drag — restored where sites block them | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Global_Rabbit.js) |
+| **All websites** | **Global_Rabbit** | Right‑click restored where blocked; contextmenu only (does not break buttons) | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Global_Rabbit.js) |
 | **Instagram** | **Instagram_Rabbit** | Ultimate video controls (seek, speed, PiP, keyboard), downloads (posts/stories), overlay unlock | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Instagram_Rabbit.js) |
 | **News & magazines** (169 domains) | **Paywall_Rabbit** | DOM paywall bypass (NYT, WaPo, Economist, Bloomberg, …) | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Paywall_Rabbit.js) |
 | **Simpcity & XenForo threads** | **Forum_Rabbit** | Bulk download images/videos from forum threads | [Install](https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Forum_Rabbit.js) |
@@ -57,7 +57,7 @@ Same idea as [Ez-TikTok-Downloader](https://github.com/AlexRabbit/Ez-TikTok-Down
 | Output | Sources merged |
 |--------|----------------|
 | **Instagram_Rabbit** | Ultimate Video Controls, Download Button, standard controls, Fix Post Right Click |
-| **Global_Rabbit** | Unlock Website Limit + your Global_Rabbit pattern |
+| **Global_Rabbit** | Minimal contextmenu capture (right‑click only) |
 | **Telegram_Rabbit** | Ads remover + media downloader forks |
 | **Paywall_Rabbit** | bypass-paywalls-tampermonkey |
 | **Forum_Rabbit** | ForumPostDownloader |
