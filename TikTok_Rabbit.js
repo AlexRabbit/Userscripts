@@ -1,7 +1,8 @@
 // ==UserScript==
 // @name         TikTok_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.0
+// @run-at       document-end
+// @version      1.1.0
 // @description  One-click TikTok download (no watermark) via TikWM — video, slideshow, cache, private videos. Port of Ez-TikTok-Downloader.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.tiktok.com/*
@@ -21,7 +22,6 @@
 // @connect      *.tiktokcdn.com
 // @connect      *.tiktokv.com
 // @connect      *
-// @run-at       document-idle
 // @license      Unlicense
 // @downloadURL  https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/TikTok_Rabbit.js
 // @updateURL    https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/TikTok_Rabbit.js
@@ -74,17 +74,26 @@
     const DL_ICON =
         '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>';
 
-    GM_addStyle(`
-        .ar-tt-action{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-width:48px;cursor:pointer;-webkit-tap-highlight-color:transparent}
-        .ar-tt-action-btn{width:48px;height:48px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background .15s,transform .1s}
+    const AR_CSS = `
+        .ar-tt-action{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:48px;flex-shrink:0;position:relative;z-index:12;pointer-events:auto;-webkit-tap-highlight-color:transparent}
+        .ar-tt-action-btn{width:48px;height:48px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background .15s,transform .1s;pointer-events:auto}
         .ar-tt-action-btn:hover{background:rgba(255,255,255,.22)}
         .ar-tt-action-btn:active{transform:scale(.94)}
         .ar-tt-action-btn.is-busy{opacity:.55;pointer-events:none}
-        .ar-tt-action-btn svg{width:22px;height:22px}
-        .ar-tt-action-label{color:#fff;font-size:12px;font-weight:600;line-height:1.2;font-family:TikTokFont,Arial,sans-serif;text-shadow:0 1px 2px rgba(0,0,0,.4)}
+        .ar-tt-action-btn svg{width:22px;height:22px;pointer-events:none}
+        .ar-tt-action-label{color:#fff;font-size:12px;font-weight:600;line-height:1.2;font-family:TikTokFont,Arial,sans-serif;text-shadow:0 1px 2px rgba(0,0,0,.4);pointer-events:none}
         .ar-tt-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2147483646;background:rgba(37,37,37,.94);color:#fff;padding:10px 18px;border-radius:8px;font:600 14px/1.3 TikTokFont,Arial,sans-serif;box-shadow:0 4px 24px rgba(0,0,0,.45);pointer-events:none;opacity:0;transition:opacity .2s}
         .ar-tt-toast.show{opacity:1}
-    `);
+    `;
+    try {
+        if (typeof GM_addStyle === 'function') GM_addStyle(AR_CSS);
+        else throw new Error('no GM_addStyle');
+    } catch {
+        const st = document.createElement('style');
+        st.id = 'ar-tt-styles';
+        st.textContent = AR_CSS;
+        (document.head || document.documentElement).appendChild(st);
+    }
 
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -130,8 +139,8 @@
         const h = { ...TIKWM_HEADERS };
         const sid = getSessionId();
         if (sid) {
-            h.Referer = `https://www.tikwm.com/originalDownloader.html?cookie=sessionid=$sid}`;
-            h['x-proxy-cookie'] = `sessionid=$sid}`;
+            h.Referer = `https://www.tikwm.com/originalDownloader.html?cookie=sessionid=${sid}`;
+            h['x-proxy-cookie'] = `sessionid=${sid}`;
         }
         return h;
     }
@@ -238,48 +247,112 @@
         return url;
     }
 
-    function parseSigiVideoUrl() {
-        const el = document.getElementById('SIGI_STATE');
+    function itemStructToUrl(item) {
+        if (!item?.id) return null;
+        const uid =
+            item.author?.uniqueId ||
+            item.author?.nickname ||
+            extractUsername(location.href) ||
+            'user';
+        const path = item.imagePost || item.images ? 'photo' : 'video';
+        return `https://www.tiktok.com/@${uid}/${path}/${item.id}`;
+    }
+
+    function parseUniversalVideoUrl() {
+        const el = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
         if (!el?.textContent) return null;
         try {
-            const state = JSON.parse(el.textContent);
-            const items = state.ItemModule || {};
-            for (const id of Object.keys(items)) {
-                const item = items[id];
-                if (!item?.video && !item?.imagePost) continue;
-                let author =
-                    item.author ||
-                    (state.UserModule && item.authorId && state.UserModule[item.authorId]?.uniqueId);
-                if (!author && item.author) author = item.author;
-                const uid =
-                    (typeof author === 'string' ? author : author?.uniqueId) ||
-                    extractUsername(location.href) ||
-                    'user';
-                const path = item.imagePost ? 'photo' : 'video';
-                return `https://www.tiktok.com/@${uid}/${path}/${id}`;
+            const data = JSON.parse(el.textContent);
+            const scope = data?.__DEFAULT_SCOPE__ || {};
+            const paths = [
+                scope['webapp.video-detail']?.itemInfo?.itemStruct,
+                scope['webapp.browse-video-detail']?.videoData?.itemInfo?.itemStruct,
+                scope['webapp.reflow.video.detail']?.itemInfo?.itemStruct,
+            ];
+            for (const item of paths) {
+                const url = itemStructToUrl(item);
+                if (url) return url;
             }
         } catch {}
         return null;
     }
 
-    async function getCurrentVideoUrl() {
-        let url = location.href;
-        if (/\/(video|photo)\/\d+/.test(location.pathname)) {
-            return normalizeUrl(url);
+    function parseSigiVideoUrl(scopeEl) {
+        const el = document.getElementById('SIGI_STATE');
+        if (!el?.textContent) return null;
+        try {
+            const state = JSON.parse(el.textContent);
+            const items = state.ItemModule || {};
+            const scope = scopeEl ? findVideoScope(scopeEl) : null;
+            const authorInScope = scope?.querySelector('a[href*="/@"]')?.href?.match(
+                /tiktok\.com\/@([^/?]+)/
+            )?.[1];
+
+            for (const id of Object.keys(items)) {
+                const item = items[id];
+                if (!item?.video && !item?.imagePost && !item?.images) continue;
+                const uid =
+                    item.author?.uniqueId ||
+                    (state.UserModule?.[item.author]?.uniqueId) ||
+                    (typeof item.author === 'string' ? item.author : null);
+                if (authorInScope && uid && uid !== authorInScope) continue;
+                const url = itemStructToUrl(item);
+                if (url) return url;
+            }
+        } catch {}
+        return null;
+    }
+
+    function findVideoScope(fromEl) {
+        let node = fromEl || document.body;
+        for (let i = 0; i < 30 && node; i++) {
+            if (node.querySelector?.('video')) return node;
+            node = node.parentElement;
         }
-        const link = document.querySelector(
+        return fromEl || document;
+    }
+
+    async function getCurrentVideoUrl(scopeEl) {
+        const root = scopeEl ? findVideoScope(scopeEl) : document;
+        if (!scopeEl && /\/(video|photo)\/\d+/.test(location.pathname)) {
+            return normalizeUrl(location.href);
+        }
+        const links = root.querySelectorAll?.(
             'a[href*="/video/"], a[href*="/photo/"]'
         );
-        if (link?.href && /tiktok\.com/.test(link.href)) {
-            return normalizeUrl(link.href);
+        if (links?.length) {
+            for (const a of links) {
+                if (/tiktok\.com\/@[^/]+\/(video|photo)\/\d+/i.test(a.href)) {
+                    return normalizeUrl(a.href);
+                }
+            }
+            const first = links[0];
+            if (first?.href && /tiktok\.com/.test(first.href)) {
+                return normalizeUrl(first.href);
+            }
         }
-        const sigi = parseSigiVideoUrl();
+        const authorLink = root.querySelector?.('a[href*="/@"]');
+        const vid =
+            root.querySelector?.('[data-e2e="browse-video"]') ||
+            root.closest?.('[data-e2e="browse-video"]');
+        if (authorLink && vid) {
+            const m = authorLink.href.match(/tiktok\.com\/@([^/?]+)/);
+            const idMatch = location.pathname.match(/\/(video|photo)\/(\d+)/);
+            if (m && idMatch) {
+                return normalizeUrl(
+                    `https://www.tiktok.com/@${m[1]}/${idMatch[1]}/${idMatch[2]}`
+                );
+            }
+        }
+        const universal = parseUniversalVideoUrl();
+        if (universal) return universal;
+        const sigi = parseSigiVideoUrl(scopeEl || root);
         if (sigi) return sigi;
         const canonical = document.querySelector('link[rel="canonical"]')?.href;
         if (canonical && /tiktok\.com/.test(canonical) && /\/(video|photo)\//.test(canonical)) {
             return normalizeUrl(canonical);
         }
-        return normalizeUrl(url);
+        return normalizeUrl(location.href);
     }
 
     async function submitTikwmTask(tiktokUrl) {
@@ -476,89 +549,126 @@
 
     async function runDownload(btn) {
         if (btn?.classList.contains('is-busy')) return;
-        btn?.classList.add('is-busy');
+        btn.classList.add('is-busy');
         try {
-            const url = await getCurrentVideoUrl();
+            const scope = btn.closest('[data-ar-tt-scope]');
+            const url = await getCurrentVideoUrl(scope || btn);
             await processUrl(url, true);
         } catch (e) {
             console.error('[TikTok_Rabbit]', e);
             toast('Download error');
         } finally {
-            btn?.classList.remove('is-busy');
+            btn.classList.remove('is-busy');
         }
     }
 
-    function findCollectAnchor() {
-        const selectors = [
-            '[data-e2e="browse-collect-icon"]',
-            '[data-e2e="video-player-collect"]',
-            '[data-e2e="collect-icon"]',
-            'button[aria-label*="Favorite" i]',
-            'button[aria-label*="Bookmarks" i]',
-            'button[aria-label*="Save" i]',
-        ];
-        for (const sel of selectors) {
-            const el = document.querySelector(sel);
-            if (el) {
-                return el.closest('button') || el.closest('[role="button"]') || el;
-            }
-        }
-        return null;
-    }
-
-    function findActionColumn(anchor) {
+    function actionItemRoot(btn) {
         return (
-            anchor?.closest('[class*="ActionItem"]') ||
-            anchor?.closest('[class*="action-item"]') ||
-            anchor?.parentElement?.parentElement
+            btn.closest('[data-e2e="browse-video-actions"]') ||
+            btn.closest('[class*="ActionBar"]') ||
+            btn.closest('[class*="action-bar"]') ||
+            btn.parentElement?.parentElement?.parentElement ||
+            btn.parentElement?.parentElement
         );
     }
 
-    function buildDownloadAction() {
+    function findFavoriteButtons() {
+        const found = new Set();
+        const patterns = [
+            'button[aria-label^="Add to Favorites"]',
+            'button[aria-label*="added to Favorites"]',
+            'button[aria-label*="Bookmark"]',
+            '[data-e2e="browse-collect-icon"]',
+            '[data-e2e="video-player-collect"]',
+            '[data-e2e="collect-icon"]',
+        ];
+        for (const sel of patterns) {
+            document.querySelectorAll(sel).forEach((el) => {
+                const btn = el.closest('button') || (el.matches?.('button') ? el : null);
+                if (btn) found.add(btn);
+            });
+        }
+        return [...found];
+    }
+
+    function buildDownloadAction(scopeEl) {
         const wrap = document.createElement('motion.div');
         wrap.className = 'ar-tt-action';
         wrap.setAttribute('data-ar-tiktok-download', '1');
+        if (scopeEl) wrap.setAttribute('data-ar-tt-scope', '1');
 
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'ar-tt-action-btn';
-        btn.setAttribute('aria-label', 'Download video');
+        btn.setAttribute('aria-label', 'Download video (TikTok_Rabbit)');
         btn.innerHTML = DL_ICON;
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
+            e.stopImmediatePropagation();
             runDownload(btn);
-        });
+        }, true);
 
         const label = document.createElement('span');
         label.className = 'ar-tt-action-label';
-        label.textContent = 'Save';
+        label.textContent = 'DL';
 
         wrap.appendChild(btn);
         wrap.appendChild(label);
         return wrap;
     }
 
-    function injectDownloadButtons() {
-        const collect = findCollectAnchor();
-        if (!collect) return;
-        const collectCol = findActionColumn(collect);
-        if (!collectCol?.parentElement) return;
-        const bar = collectCol.parentElement;
-        if (bar.querySelector('[data-ar-tiktok-download]')) return;
+    function injectBesideFavorite(favBtn) {
+        const bar = actionItemRoot(favBtn);
+        if (!bar || bar.querySelector('[data-ar-tiktok-download]')) return;
 
-        const dl = buildDownloadAction();
-        if (collectCol.nextSibling) {
-            bar.insertBefore(dl, collectCol.nextSibling);
+        const scope = findVideoScope(favBtn);
+        const dl = buildDownloadAction(scope);
+
+        const shareBtn = bar.querySelector(
+            'button[aria-label^="Share"], button[aria-label*="Share video"]'
+        );
+        const favWrap =
+            favBtn.closest('motion.div') ||
+            favBtn.parentElement;
+
+        if (shareBtn) {
+            const shareWrap =
+                shareBtn.closest('motion.div') || shareBtn.parentElement;
+            if (shareWrap?.parentElement === bar) {
+                bar.insertBefore(dl, shareWrap);
+                return;
+            }
+            if (favWrap?.parentElement === bar) {
+                bar.insertBefore(dl, favWrap.nextSibling);
+                return;
+            }
+        }
+        if (favWrap?.parentElement) {
+            favWrap.parentElement.insertBefore(dl, favWrap.nextSibling);
         } else {
             bar.appendChild(dl);
         }
     }
 
+    function injectDownloadButtons() {
+        const favorites = findFavoriteButtons();
+        if (favorites.length === 0) return;
+        favorites.forEach(injectBesideFavorite);
+    }
+
     function observeUi() {
-        injectDownloadButtons();
-        const obs = new MutationObserver(() => injectDownloadButtons());
-        obs.observe(document.body, { childList: true, subtree: true });
+        const tick = () => injectDownloadButtons();
+        tick();
+        setInterval(tick, 1200);
+        let debounce;
+        const obs = new MutationObserver(() => {
+            clearTimeout(debounce);
+            debounce = setTimeout(tick, 300);
+        });
+        if (document.body) {
+            obs.observe(document.body, { childList: true, subtree: true });
+        }
     }
 
     function registerMenus() {

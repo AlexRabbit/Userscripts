@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Instagram_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.0
-// @description  Ultimate video controls, media download buttons, and interaction unlock for Instagram. One script, all features. AdGuard-friendly.
+// @version      1.1.1
+// @description  Video controls, downloads on posts and profile, right-click on media. AdGuard-friendly.
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://www.instagram.com/*
 // @match        https://instagram.com/*
@@ -10,7 +10,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @run-at       document-start
-// @license      MIT
+// @license      AGPL-3.0
 // @downloadURL  https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Instagram_Rabbit.js
 // @updateURL    https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/Instagram_Rabbit.js
 // @supportURL   https://github.com/AlexRabbit/Userscripts/issues
@@ -49,8 +49,12 @@
     };
 })();
 
-(() => {
 
+
+(() => {
+	// ==========================================================================
+	// SECTION 1: CONFIGURATION
+	// ==========================================================================
 	const CONFIG = {
 		DEFAULT_VOLUME: 0.5,
 		DEFAULT_SPEED: 1,
@@ -60,7 +64,7 @@
 		LONG_PRESS_DELAY: 200,
 		SEEK_TIME: 5,
 		FRAME_TIME: 1 / 30,
-
+		// Facebook: longer delay so bar stays visible while interacting
 		UI_HIDE_DELAY: 1500,
 		UI_HIDE_WHEN_PAUSED: true,
 		MIN_PANEL_WIDTH_FOR_INLINE: 400,
@@ -69,9 +73,9 @@
 		WHEEL_SEEK_STEP: 2,
 		MIN_VIDEO_WIDTH: 100,
 		MIN_VIDEO_HEIGHT: 100,
-
+		// How often to poll for new videos (ms) - fast polling catches FB's lazy loads
 		POLL_INTERVAL: 500,
-
+		// Max zero-rect retries before giving up on a video element
 		ZERO_RECT_RETRIES: 8,
 		ZERO_RECT_RETRY_DELAY: 400,
 	};
@@ -86,8 +90,22 @@
 		pip: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 11h-8v6h8v-6zm4 8V4.98C23 3.88 22.1 3 21 3H3c-1.1 0-2 .88-2 1.98V19c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2zm-2 .02H3V4.97h18v14.05z"/></svg>`,
 	};
 
+	// ==========================================================================
+	// SECTION 2: PLATFORM DETECTION & CONFIGURATION
+	// ==========================================================================
+	// Platform-specific settings are isolated here for maintainability.
+	// Each platform has its own class prefix, storage keys, wrapper detection,
+	// and native control hiding logic.
+
 	const PLATFORM_ID = "ig";
 
+	// Runtime URL filter — re-evaluated on every processAllVideos() call so it
+	// correctly handles SPA navigation (pushState changes the URL without a
+	// page reload, and our pushState patch triggers processAllVideos() each time).
+	//
+	// Facebook: inject ONLY on /reel* and /reels* URLs.
+	// Everything else (feed, watch, groups, profile videos…) is left alone.
+	// Instagram: always allow.
 	function isFacebookInjectionAllowed() {
 		if (PLATFORM_ID !== "fb") return true;
 		return /^\/reels?(\/|$)/i.test(location.pathname);
@@ -105,6 +123,9 @@
 				? "linear-gradient(90deg, #1877f2, #42b0ff)"
 				: "linear-gradient(90deg, #0095f6, #00d4ff)",
 
+		// ==========================================================================
+		// PLATFORM-SPECIFIC: WRAPPER DETECTION
+		// ==========================================================================
 		findVideoWrapper(video) {
 			if (PLATFORM_ID === "fb") {
 				return PLATFORM._findFacebookWrapper(video);
@@ -113,23 +134,41 @@
 			}
 		},
 
+		// Facebook: Complex nested DOM requires multi-strategy detection.
+		// The DOM structure for FB Reels is (simplified):
+		//
+		//   div[data-video-id]  ← has inline style="height:Npx; width:Npx" — USE THIS
+		//     div
+		//       div.clip-container
+		//         div > div > div.video-parent
+		//           video
+		//           div[data-instancekey]  ← FB player overlay
+		//
+		// data-video-id is the canonical, stable container with explicit dimensions.
+		// We use it directly and skip all climbing heuristics that were causing
+		// the panel to land on an unsized or wrong ancestor.
 		_findFacebookWrapper(video) {
-
+			// Strategy 1 (primary): data-video-id container — always has inline
+			// width/height set by Facebook and is the correct clip boundary.
 			const videoIdDiv = video.closest("[data-video-id]");
 			if (videoIdDiv) {
 				return videoIdDiv;
 			}
 
+			// Strategy 2: data-instancekey parent — FB player container
 			const instanceDiv = video.closest("div[data-instancekey]");
 			if (instanceDiv && instanceDiv.parentElement) {
 				return instanceDiv.parentElement;
 			}
 
+			// Strategy 3: role="group" video player group
 			const groupDiv = video.closest('[role="group"][aria-label*="ideo"]');
 			if (groupDiv && groupDiv.parentElement) {
 				return groupDiv.parentElement;
 			}
 
+			// Strategy 4: first ancestor that contains native overlay controls
+			// and has a meaningful bounding rect
 			let candidate = video.parentElement;
 			for (let depth = 0; depth < 10 && candidate; depth++) {
 				const hasOverlay = candidate.querySelector(
@@ -147,6 +186,8 @@
 				candidate = candidate.parentElement;
 			}
 
+			// Strategy 5: walk up to first ancestor with a real size and
+			// non-static positioning or overflow clipping
 			let el = video.parentElement;
 			for (let depth = 0; depth < 15 && el; depth++) {
 				const st = getComputedStyle(el);
@@ -168,6 +209,8 @@
 			return video.parentElement;
 		},
 
+		// Instagram: Find the common ancestor that holds both the video
+		// and the native click-intercepting overlay (div[data-instancekey]).
 		_findInstagramWrapper(video) {
 			let el = video.parentElement;
 			for (let depth = 0; depth < 15 && el; depth++) {
@@ -179,6 +222,9 @@
 			return video.parentElement;
 		},
 
+		// ==========================================================================
+		// PLATFORM-SPECIFIC: NATIVE CONTROL HIDING CSS
+		// ==========================================================================
 		getNativeControlHidingCSS() {
 			if (PLATFORM_ID === "fb") {
 				return `
@@ -187,8 +233,8 @@
                    1. Our panel's z-index already puts our controls on top.
                    2. Hiding them caused native buttons to become invisible on hover
                       whenever ui-visible was set, which is most of the time. */
-                .$this.classPrefix}-wrapper div[role="progressbar"],
-                .$this.classPrefix}-wrapper div[role="slider"][aria-label*="ideo"] {
+                .${this.classPrefix}-wrapper div[role="progressbar"],
+                .${this.classPrefix}-wrapper div[role="slider"][aria-label*="ideo"] {
                     opacity: 0 !important;
                     pointer-events: none !important;
                 }
@@ -196,15 +242,15 @@
 			} else {
 				return `
                 /* Hide Instagram's native controls overlay */
-                .$this.classPrefix}-wrapper > div[data-instancekey] > div:first-child {
+                .${this.classPrefix}-wrapper > div[data-instancekey] > div:first-child {
                     z-index: 1 !important;
                 }
 
                 /* Instagram native button containers - position above our controls */
-                .$this.classPrefix}-wrapper div:has(> button[aria-label="Toggle audio"]),
-                .$this.classPrefix}-wrapper div:has(> button[aria-label*="audio"]) {
+                .${this.classPrefix}-wrapper div:has(> button[aria-label="Toggle audio"]),
+                .${this.classPrefix}-wrapper div:has(> button[aria-label*="audio"]) {
                     position: absolute !important;
-                    bottom: calc(var(--$this.classPrefix}-panel-height, 36px) + 8px) !important;
+                    bottom: calc(var(--${this.classPrefix}-panel-height, 36px) + 8px) !important;
                     top: auto !important;
                     right: 8px !important;
                     left: auto !important;
@@ -214,16 +260,16 @@
                     pointer-events: none !important;
                 }
 
-                .$this.classPrefix}-wrapper.ui-visible div:has(> button[aria-label="Toggle audio"]),
-                .$this.classPrefix}-wrapper.ui-visible div:has(> button[aria-label*="audio"]) {
+                .${this.classPrefix}-wrapper.ui-visible div:has(> button[aria-label="Toggle audio"]),
+                .${this.classPrefix}-wrapper.ui-visible div:has(> button[aria-label*="audio"]) {
                     opacity: 1 !important;
                     pointer-events: auto !important;
                 }
 
-                .$this.classPrefix}-wrapper div:has(> button svg[aria-label="Tags"]),
-                .$this.classPrefix}-wrapper div:has(> button svg[aria-label*="Tags"]) {
+                .${this.classPrefix}-wrapper div:has(> button svg[aria-label="Tags"]),
+                .${this.classPrefix}-wrapper div:has(> button svg[aria-label*="Tags"]) {
                     position: absolute !important;
-                    bottom: calc(var(--$this.classPrefix}-panel-height, 36px) + 8px) !important;
+                    bottom: calc(var(--${this.classPrefix}-panel-height, 36px) + 8px) !important;
                     top: auto !important;
                     left: 8px !important;
                     right: auto !important;
@@ -233,8 +279,8 @@
                     pointer-events: none !important;
                 }
 
-                .$this.classPrefix}-wrapper.ui-visible div:has(> button svg[aria-label="Tags"]),
-                .$this.classPrefix}-wrapper.ui-visible div:has(> button svg[aria-label*="Tags"]) {
+                .${this.classPrefix}-wrapper.ui-visible div:has(> button svg[aria-label="Tags"]),
+                .${this.classPrefix}-wrapper.ui-visible div:has(> button svg[aria-label*="Tags"]) {
                     opacity: 1 !important;
                     pointer-events: auto !important;
                 }
@@ -243,6 +289,10 @@
 		},
 	};
 
+
+	// ==========================================================================
+	// SECTION 3: STATE MANAGEMENT
+	// ==========================================================================
 	const State = {
 		data: null,
 		listeners: new Set(),
@@ -256,12 +306,12 @@
 
 			try {
 				if (typeof GM_getValue === "function") {
-					autoUnmute = GM_getValue(`$prefix}autoUnmute`, false);
-					const savedVolume = GM_getValue(`$prefix}volume`, null);
+					autoUnmute = GM_getValue(`${prefix}autoUnmute`, false);
+					const savedVolume = GM_getValue(`${prefix}volume`, null);
 					if (savedVolume !== null && !Number.isNaN(savedVolume)) {
 						volume = Utils.clamp(parseFloat(savedVolume), 0, 1);
 					}
-					const savedSpeed = GM_getValue(`$prefix}speed`, null);
+					const savedSpeed = GM_getValue(`${prefix}speed`, null);
 					if (
 						savedSpeed !== null &&
 						!Number.isNaN(savedSpeed) &&
@@ -272,7 +322,7 @@
 				}
 			} catch (e) {
 				console.warn(
-					`[$PLATFORM.classPrefix.toUpperCase()}] GM_getValue not available:`,
+					`[${PLATFORM.classPrefix.toUpperCase()}] GM_getValue not available:`,
 					e,
 				);
 			}
@@ -295,7 +345,7 @@
 			if (key === "volume" || key === "speed") {
 				try {
 					if (typeof GM_setValue === "function") {
-						GM_setValue(`$PLATFORM.storagePrefix}$key}`, value);
+						GM_setValue(`${PLATFORM.storagePrefix}${key}`, value);
 					}
 				} catch (_e) {}
 			}
@@ -306,7 +356,7 @@
 			this.data.autoUnmute = value;
 			try {
 				if (typeof GM_setValue === "function") {
-					GM_setValue(`$PLATFORM.storagePrefix}autoUnmute`, value);
+					GM_setValue(`${PLATFORM.storagePrefix}autoUnmute`, value);
 				}
 			} catch (_e) {}
 			if (value) {
@@ -341,6 +391,9 @@
 		},
 	};
 
+	// ==========================================================================
+	// SECTION 3: AUDIO ENGINE
+	// ==========================================================================
 	const AudioEngine = {
 		init() {
 			const observer = new MutationObserver((mutations) => {
@@ -419,6 +472,9 @@
 		},
 	};
 
+	// ==========================================================================
+	// SECTION 5: UTILITIES
+	// ==========================================================================
 	const Utils = {
 		formatTime(seconds) {
 			if (!seconds || Number.isNaN(seconds)) return "0:00";
@@ -426,9 +482,9 @@
 			const mins = Math.floor((seconds % 3600) / 60);
 			const secs = Math.floor(seconds % 60);
 			if (hrs > 0) {
-				return `$hrs}:$mins.toString().padStart(2, "0")}:$secs.toString().padStart(2, "0")}`;
+				return `${hrs}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
 			}
-			return `$mins}:$secs.toString().padStart(2, "0")}`;
+			return `${mins}:${secs.toString().padStart(2, "0")}`;
 		},
 
 		debounce(fn, delay) {
@@ -478,11 +534,19 @@
 			);
 		},
 
+		/**
+		 * Find the best wrapper element for a video.
+		 * Delegates to the platform-specific implementation above.
+		 * This copy in Utils is kept for any legacy call sites.
+		 */
 		findVideoWrapper(video) {
 			return PLATFORM.findVideoWrapper(video);
 		},
 	};
 
+	// ==========================================================================
+	// SECTION 6: STYLES
+	// ==========================================================================
 	const Styles = {
 		inject() {
 			if (document.getElementById(PLATFORM.styleId)) return;
@@ -492,10 +556,10 @@
 			css.id = PLATFORM.styleId;
 			css.textContent = `
                 /* Main Control Panel */
-                .$p}-panel {
-                    --$p}-btn-size: 36px;
-                    --$p}-glow: 0 0 8px $PLATFORM.accentColor}80, 0 0 16px $PLATFORM.accentColor}40;
-                    --$p}-glow-subtle: 0 0 6px $PLATFORM.accentColor}60;
+                .${p}-panel {
+                    --${p}-btn-size: 36px;
+                    --${p}-glow: 0 0 8px ${PLATFORM.accentColor}80, 0 0 16px ${PLATFORM.accentColor}40;
+                    --${p}-glow-subtle: 0 0 6px ${PLATFORM.accentColor}60;
                     position: absolute !important;
                     bottom: 0 !important;
                     left: 0 !important;
@@ -513,31 +577,31 @@
                     isolation: isolate !important;
                 }
 
-                .$p}-wrapper.ui-visible .$p}-panel {
+                .${p}-wrapper.ui-visible .${p}-panel {
                     opacity: 1 !important;
                     visibility: visible !important;
                     transition: opacity 0.2s ease, visibility 0s linear 0s !important;
                     pointer-events: auto !important;
                 }
 
-                .$p}-wrapper.ui-visible .$p}-panel,
-                .$p}-wrapper.ui-visible .$p}-panel * {
+                .${p}-wrapper.ui-visible .${p}-panel,
+                .${p}-wrapper.ui-visible .${p}-panel * {
                     pointer-events: auto !important;
                 }
 
-                .$p}-controls {
+                .${p}-controls {
                     display: flex;
                     align-items: center;
                     gap: 0;
-                    min-height: var(--$p}-btn-size);
+                    min-height: var(--${p}-btn-size);
                     padding: 0;
                     margin: 0 !important;
                 }
 
-                .$p}-btn {
+                .${p}-btn {
                     all: unset;
-                    width: var(--$p}-btn-size);
-                    height: var(--$p}-btn-size);
+                    width: var(--${p}-btn-size);
+                    height: var(--${p}-btn-size);
                     display: flex;
                     align-items: center;
                     justify-content: center;
@@ -549,25 +613,25 @@
                     box-sizing: border-box;
                 }
 
-                .$p}-btn:hover {
+                .${p}-btn:hover {
                     background: rgba(255,255,255,0.2);
-                    box-shadow: var(--$p}-glow);
+                    box-shadow: var(--${p}-glow);
                 }
 
-                .$p}-btn:active {
+                .${p}-btn:active {
                     background: rgba(255,255,255,0.3);
-                    box-shadow: var(--$p}-glow-subtle);
+                    box-shadow: var(--${p}-glow-subtle);
                 }
 
-                .$p}-btn svg {
+                .${p}-btn svg {
                     width: 18px;
                     height: 18px;
                 }
 
                 /* Timeline */
-                .$p}-timeline {
+                .${p}-timeline {
                     flex: 1;
-                    height: var(--$p}-btn-size);
+                    height: var(--${p}-btn-size);
                     display: flex;
                     align-items: stretch;
                     cursor: pointer;
@@ -576,7 +640,7 @@
                     padding: 0 !important;
                 }
 
-                .$p}-timeline-track {
+                .${p}-timeline-track {
                     width: 100%;
                     height: 100%;
                     background: rgba(255,255,255,0.25);
@@ -586,13 +650,13 @@
                     transition: box-shadow 0.15s;
                 }
 
-                .$p}-timeline:hover .$p}-timeline-track {
-                    box-shadow: var(--$p}-glow);
+                .${p}-timeline:hover .${p}-timeline-track {
+                    box-shadow: var(--${p}-glow);
                 }
 
-                .$p}-timeline-progress {
+                .${p}-timeline-progress {
                     height: 100%;
-                    background: $PLATFORM.accentGradient};
+                    background: ${PLATFORM.accentGradient};
                     border-radius: 0;
                     width: 0%;
                     position: absolute;
@@ -600,11 +664,11 @@
                     left: 0;
                 }
 
-                .$p}-panel.stacked .$p}-timeline {
-                    height: var(--$p}-btn-size);
+                .${p}-panel.stacked .${p}-timeline {
+                    height: var(--${p}-btn-size);
                 }
 
-                .$p}-timeline-thumb {
+                .${p}-timeline-thumb {
                     position: absolute;
                     right: -6px;
                     top: 50%;
@@ -618,15 +682,15 @@
                     z-index: 2;
                 }
 
-                .$p}-timeline:hover .$p}-timeline-thumb {
-                    box-shadow: 0 0 4px rgba(0,0,0,0.5), var(--$p}-glow-subtle);
+                .${p}-timeline:hover .${p}-timeline-thumb {
+                    box-shadow: 0 0 4px rgba(0,0,0,0.5), var(--${p}-glow-subtle);
                 }
 
-                .$p}-timeline:hover .$p}-timeline-thumb {
+                .${p}-timeline:hover .${p}-timeline-thumb {
                     transform: translateY(-50%) scale(1);
                 }
 
-                .$p}-timeline-tooltip {
+                .${p}-timeline-tooltip {
                     position: absolute;
                     bottom: 100%;
                     background: rgba(20,20,20,0.95);
@@ -645,13 +709,13 @@
                     box-shadow: 0 2px 8px rgba(0,0,0,0.4);
                 }
 
-                .$p}-timeline:hover .$p}-timeline-tooltip {
+                .${p}-timeline:hover .${p}-timeline-tooltip {
                     opacity: 1;
-                    box-shadow: var(--$p}-glow);
+                    box-shadow: var(--${p}-glow);
                 }
 
-                .$p}-time-current,
-                .$p}-time-duration {
+                .${p}-time-current,
+                .${p}-time-duration {
                     position: absolute;
                     top: 50%;
                     transform: translateY(-50%);
@@ -666,17 +730,17 @@
                     padding: 0 5px;
                 }
 
-                .$p}-time-current { left: 0; }
-                .$p}-time-duration { right: 0; }
+                .${p}-time-current { left: 0; }
+                .${p}-time-duration { right: 0; }
 
                 /* Volume Control */
-                .$p}-volume-wrap {
+                .${p}-volume-wrap {
                     display: flex;
                     align-items: center;
                     position: relative;
                 }
 
-                .$p}-slider-popup {
+                .${p}-slider-popup {
                     position: absolute;
                     bottom: 100%;
                     left: 50%;
@@ -692,21 +756,21 @@
                     flex-direction: column;
                     align-items: center;
                     gap: 4px;
-                    width: var(--$p}-btn-size);
+                    width: var(--${p}-btn-size);
                     overflow: hidden;
                     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
                     z-index: 2147483650;
                     box-sizing: border-box;
                 }
 
-                .$p}-volume-wrap:hover .$p}-slider-popup,
-                .$p}-speed-wrap:hover .$p}-slider-popup {
+                .${p}-volume-wrap:hover .${p}-slider-popup,
+                .${p}-speed-wrap:hover .${p}-slider-popup {
                     opacity: 1;
                     visibility: visible;
-                    box-shadow: var(--$p}-glow);
+                    box-shadow: var(--${p}-glow);
                 }
 
-                .$p}-slider-value {
+                .${p}-slider-value {
                     color: white;
                     font-size: 9px;
                     font-weight: bold;
@@ -717,7 +781,7 @@
                     overflow: hidden;
                 }
 
-                .$p}-auto-unmute-wrap {
+                .${p}-auto-unmute-wrap {
                     display: flex;
                     align-items: center;
                     justify-content: center;
@@ -728,16 +792,16 @@
                     margin-bottom: 4px;
                 }
 
-                .$p}-auto-unmute-checkbox {
+                .${p}-auto-unmute-checkbox {
                     width: 14px;
                     height: 14px;
                     cursor: pointer;
-                    accent-color: $PLATFORM.accentColor};
+                    accent-color: ${PLATFORM.accentColor};
                     margin: 0;
                 }
 
                 /* Tooltip */
-                .$p}-tooltip {
+                .${p}-tooltip {
                     position: fixed;
                     background: rgba(20,20,20,0.95);
                     color: #f0f0f0;
@@ -756,13 +820,13 @@
                     letter-spacing: 0.01em;
                 }
 
-                .$p}-tooltip.visible {
+                .${p}-tooltip.visible {
                     opacity: 1;
                     visibility: visible;
                 }
 
                 /* Vertical Range Slider */
-                .$p}-range-vertical {
+                .${p}-range-vertical {
                     -webkit-appearance: none;
                     appearance: none;
                     background: transparent;
@@ -775,13 +839,13 @@
                     touch-action: none;
                 }
 
-                .$p}-range-vertical::-webkit-slider-runnable-track {
+                .${p}-range-vertical::-webkit-slider-runnable-track {
                     height: 4px;
                     background: rgba(255,255,255,0.3);
                     border-radius: 2px;
                 }
 
-                .$p}-range-vertical::-webkit-slider-thumb {
+                .${p}-range-vertical::-webkit-slider-thumb {
                     -webkit-appearance: none;
                     appearance: none;
                     width: 16px;
@@ -793,18 +857,18 @@
                     cursor: grab;
                 }
 
-                .$p}-range-vertical::-webkit-slider-thumb:active {
+                .${p}-range-vertical::-webkit-slider-thumb:active {
                     cursor: grabbing;
                     transform: scale(1.1);
                 }
 
-                .$p}-range-vertical::-moz-range-track {
+                .${p}-range-vertical::-moz-range-track {
                     height: 4px;
                     background: rgba(255,255,255,0.3);
                     border-radius: 2px;
                 }
 
-                .$p}-range-vertical::-moz-range-thumb {
+                .${p}-range-vertical::-moz-range-thumb {
                     width: 16px;
                     height: 16px;
                     background: white;
@@ -815,13 +879,13 @@
                 }
 
                 /* Speed Control */
-                .$p}-speed-wrap {
+                .${p}-speed-wrap {
                     display: flex;
                     align-items: center;
                     position: relative;
                 }
 
-                .$p}-speed-btn {
+                .${p}-speed-btn {
                     font-size: 11px;
                     font-weight: bold;
                     font-family: monospace;
@@ -829,7 +893,7 @@
                 }
 
                 /* Hint Overlay */
-                .$p}-hint {
+                .${p}-hint {
                     position: absolute;
                     bottom: 80px;
                     left: 50%;
@@ -846,18 +910,18 @@
                     z-index: 2147483645;
                 }
 
-                .$p}-hint.show {
+                .${p}-hint.show {
                     opacity: 1;
-                    box-shadow: var(--$p}-glow);
+                    box-shadow: var(--${p}-glow);
                 }
 
                 /* Stacked layout */
-                .$p}-panel.stacked .$p}-controls {
+                .${p}-panel.stacked .${p}-controls {
                     flex-wrap: wrap;
                     gap: 0;
                 }
 
-                .$p}-panel.stacked .$p}-timeline {
+                .${p}-panel.stacked .${p}-timeline {
                     order: -1;
                     width: 100%;
                     flex: none;
@@ -865,39 +929,42 @@
                 }
 
                 /* Wrapper */
-                .$p}-wrapper {
+                .${p}-wrapper {
                     position: relative !important;
                     z-index: 2147483646 !important;
                     isolation: isolate !important;
                 }
 
                 /* Ensure video is clickable */
-                .$p}-wrapper video {
+                .${p}-wrapper video {
                     position: relative;
                     z-index: 0;
                 }
 
                 /* Ensure our wrapper doesn't break layout */
-                .$p}-wrapper {
+                .${p}-wrapper {
                     display: block !important;
                     contain: layout !important;
                 }
 
                 /* Catch-all: make sure mouse events reach wrapper even through overlays */
-                .$p}-wrapper * {
+                .${p}-wrapper * {
                     pointer-events: auto;
                 }
 
                 /* ========================================
                    PLATFORM-SPECIFIC: NATIVE CONTROL HIDING
                    ======================================== */
-                $PLATFORM.getNativeControlHidingCSS()}
+                ${PLATFORM.getNativeControlHidingCSS()}
             `;
 
 			document.head.appendChild(css);
 		},
 	};
 
+	// ==========================================================================
+	// SECTION 7: TOOLTIP MANAGER
+	// ==========================================================================
 	const TooltipManager = {
 		element: null,
 		hideTimeout: null,
@@ -905,7 +972,7 @@
 		init() {
 			if (this.element) return;
 			this.element = document.createElement("div");
-			this.element.className = `$PLATFORM.classPrefix}-tooltip`;
+			this.element.className = `${PLATFORM.classPrefix}-tooltip`;
 			document.body.appendChild(this.element);
 		},
 
@@ -914,7 +981,7 @@
 			clearTimeout(this.hideTimeout);
 
 			this.element.textContent = text;
-			this.element.className = `$PLATFORM.classPrefix}-tooltip visible`;
+			this.element.className = `${PLATFORM.classPrefix}-tooltip visible`;
 
 			const rect = targetElement.getBoundingClientRect();
 			this.element.style.left = "-9999px";
@@ -946,8 +1013,8 @@
 				top = window.innerHeight - tooltipRect.height - 5;
 			}
 
-			this.element.style.left = `$left}px`;
-			this.element.style.top = `$top}px`;
+			this.element.style.left = `${left}px`;
+			this.element.style.top = `${top}px`;
 		},
 
 		hide() {
@@ -965,6 +1032,9 @@
 		},
 	};
 
+	// ==========================================================================
+	// SECTION 8: VIDEO CONTROLS UI
+	// ==========================================================================
 	class VideoControlsUI {
 		constructor(video, wrapper) {
 			this.video = video;
@@ -982,53 +1052,49 @@
 
 		createUI() {
 			const p = PLATFORM.classPrefix;
-			this.wrapper.classList.add(`$p}-wrapper`);
+			this.wrapper.classList.add(`${p}-wrapper`);
 
+			// Position is already enforced in processVideo before createUI is called.
+			// This is a safety net only (e.g. if createUI is ever called standalone).
 			const computedPos = getComputedStyle(this.wrapper).position;
 			if (computedPos === "static") {
 				this.wrapper.style.position = "relative";
 			}
 
+			// Main panel
 			this.panel = document.createElement("div");
-			this.panel.className = `$p}-panel`;
+			this.panel.className = `${p}-panel`;
 
 			const controls = document.createElement("div");
-			controls.className = `$p}-controls`;
+			controls.className = `${p}-controls`;
 
-			this.playBtn = this.createButton(`$p}-btn $p}-play`, ICONS.play, () =>
+			// Play/Pause
+			this.playBtn = this.createButton(`${p}-btn ${p}-play`, ICONS.play, () =>
 				this.togglePlay(),
 			);
 			TooltipManager.attach(this.playBtn, "Play / Pause (Space)");
 
+			// Timeline
 			this.timeline = this.createTimeline();
 
+			// Volume
 			this.volumeWrap = this.createVolumeControl();
 
+			// Speed
 			this.speedWrap = this.createSpeedControl();
 
-			this.supportBtn = document.createElement("a");
-			this.supportBtn.className = `$p}-btn`;
-			this.supportBtn.href = "https://ko-fi.com/piknockyou";
-			this.supportBtn.target = "_blank";
-			this.supportBtn.rel = "noopener noreferrer";
-			this.supportBtn.ariaLabel = "Support this script";
-			this.supportBtn.innerHTML = "☕";
-			this.supportBtn.style.fontSize = "16px";
-			this.supportBtn.style.textDecoration = "none";
-			this.supportBtn.addEventListener("click", (e) => e.stopPropagation());
-			TooltipManager.attach(this.supportBtn, "Support this script");
-
-			this.pipBtn = this.createButton(`$p}-btn`, ICONS.pip, () =>
+			// PiP
+			this.pipBtn = this.createButton(`${p}-btn`, ICONS.pip, () =>
 				this.togglePiP(),
 			);
 			TooltipManager.attach(this.pipBtn, "Picture-in-Picture (P)");
 
-			this.fsBtn = this.createButton(`$p}-btn`, ICONS.fullscreen, () =>
+			// Fullscreen
+			this.fsBtn = this.createButton(`${p}-btn`, ICONS.fullscreen, () =>
 				this.toggleFullscreen(),
 			);
 			TooltipManager.attach(this.fsBtn, "Fullscreen (F)");
 
-			this.supportBtn.style.marginLeft = "auto";
 			this.playBtn.style.marginLeft = "0";
 			this.fsBtn.style.marginRight = "0";
 
@@ -1037,18 +1103,19 @@
 				this.volumeWrap,
 				this.speedWrap,
 				this.timeline,
-				this.supportBtn,
-				this.pipBtn,
+					this.pipBtn,
 				this.fsBtn,
 			);
 
 			this.panel.appendChild(controls);
 			this.wrapper.appendChild(this.panel);
 
+			// Hint overlay
 			this.hint = document.createElement("div");
-			this.hint.className = `$p}-hint`;
+			this.hint.className = `${p}-hint`;
 			this.wrapper.appendChild(this.hint);
 
+			// Prevent Facebook events from escaping our panel
 			const stopPanelEvent = (e) => {
 				e.stopPropagation();
 				e.stopImmediatePropagation();
@@ -1076,27 +1143,27 @@
 		createTimeline() {
 			const p = PLATFORM.classPrefix;
 			const timeline = document.createElement("div");
-			timeline.className = `$p}-timeline`;
+			timeline.className = `${p}-timeline`;
 
 			const track = document.createElement("div");
-			track.className = `$p}-timeline-track`;
+			track.className = `${p}-timeline-track`;
 
 			this.progress = document.createElement("div");
-			this.progress.className = `$p}-timeline-progress`;
+			this.progress.className = `${p}-timeline-progress`;
 
 			const thumb = document.createElement("div");
-			thumb.className = `$p}-timeline-thumb`;
+			thumb.className = `${p}-timeline-thumb`;
 
 			this.tooltip = document.createElement("div");
-			this.tooltip.className = `$p}-timeline-tooltip`;
+			this.tooltip.className = `${p}-timeline-tooltip`;
 			this.tooltip.textContent = "0:00";
 
 			this.timeCurrent = document.createElement("span");
-			this.timeCurrent.className = `$p}-time-current`;
+			this.timeCurrent.className = `${p}-time-current`;
 			this.timeCurrent.textContent = "0:00";
 
 			this.timeDuration = document.createElement("span");
-			this.timeDuration.className = `$p}-time-duration`;
+			this.timeDuration.className = `${p}-time-duration`;
 			this.timeDuration.textContent = "0:00";
 
 			this.progress.appendChild(thumb);
@@ -1132,22 +1199,23 @@
 		createVolumeControl() {
 			const p = PLATFORM.classPrefix;
 			const wrap = document.createElement("div");
-			wrap.className = `$p}-volume-wrap`;
+			wrap.className = `${p}-volume-wrap`;
 
-			this.muteBtn = this.createButton(`$p}-btn`, ICONS.volumeHigh, () =>
+			this.muteBtn = this.createButton(`${p}-btn`, ICONS.volumeHigh, () =>
 				this.toggleMute(),
 			);
 			TooltipManager.attach(this.muteBtn, "Volume (M)", "left");
 
 			const popup = document.createElement("div");
-			popup.className = `$p}-slider-popup`;
+			popup.className = `${p}-slider-popup`;
 
+			// Auto-unmute checkbox
 			const autoUnmuteWrap = document.createElement("label");
-			autoUnmuteWrap.className = `$p}-auto-unmute-wrap`;
+			autoUnmuteWrap.className = `${p}-auto-unmute-wrap`;
 
 			this.autoUnmuteCheckbox = document.createElement("input");
 			this.autoUnmuteCheckbox.type = "checkbox";
-			this.autoUnmuteCheckbox.className = `$p}-auto-unmute-checkbox`;
+			this.autoUnmuteCheckbox.className = `${p}-auto-unmute-checkbox`;
 			this.autoUnmuteCheckbox.checked = State.get("autoUnmute");
 
 			autoUnmuteWrap.appendChild(this.autoUnmuteCheckbox);
@@ -1168,12 +1236,12 @@
 			});
 
 			this.volumeValue = document.createElement("span");
-			this.volumeValue.className = `$p}-slider-value`;
-			this.volumeValue.textContent = `$Math.round(State.get("volume") * 100)}%`;
+			this.volumeValue.className = `${p}-slider-value`;
+			this.volumeValue.textContent = `${Math.round(State.get("volume") * 100)}%`;
 
 			this.volumeSlider = document.createElement("input");
 			this.volumeSlider.type = "range";
-			this.volumeSlider.className = `$p}-range-vertical`;
+			this.volumeSlider.className = `${p}-range-vertical`;
 			this.volumeSlider.min = "0";
 			this.volumeSlider.max = "1";
 			this.volumeSlider.step = "0.01";
@@ -1184,9 +1252,9 @@
 				const vol = parseFloat(this.volumeSlider.value);
 				State.set("volume", vol);
 				if (vol > 0 && State.get("muted")) State.set("muted", false);
-				this.volumeValue.textContent = `$Math.round(vol * 100)}%`;
+				this.volumeValue.textContent = `${Math.round(vol * 100)}%`;
 				this.applyVolume();
-				this.showHint(`$Math.round(vol * 100)}%`);
+				this.showHint(`${Math.round(vol * 100)}%`);
 			};
 
 			this.volumeSlider.addEventListener("input", handleVolumeInput);
@@ -1213,23 +1281,23 @@
 		createSpeedControl() {
 			const p = PLATFORM.classPrefix;
 			const wrap = document.createElement("div");
-			wrap.className = `$p}-speed-wrap`;
+			wrap.className = `${p}-speed-wrap`;
 
 			this.speedBtn = document.createElement("button");
-			this.speedBtn.className = `$p}-btn $p}-speed-btn`;
-			this.speedBtn.textContent = `$State.get("speed")}x`;
+			this.speedBtn.className = `${p}-btn ${p}-speed-btn`;
+			this.speedBtn.textContent = `${State.get("speed")}x`;
 			TooltipManager.attach(this.speedBtn, "Speed ([ / ])", "right");
 
 			const popup = document.createElement("div");
-			popup.className = `$p}-slider-popup`;
+			popup.className = `${p}-slider-popup`;
 
 			this.speedValue = document.createElement("span");
-			this.speedValue.className = `$p}-slider-value`;
-			this.speedValue.textContent = `$State.get("speed")}x`;
+			this.speedValue.className = `${p}-slider-value`;
+			this.speedValue.textContent = `${State.get("speed")}x`;
 
 			this.speedSlider = document.createElement("input");
 			this.speedSlider.type = "range";
-			this.speedSlider.className = `$p}-range-vertical`;
+			this.speedSlider.className = `${p}-range-vertical`;
 			this.speedSlider.min = "0";
 			this.speedSlider.max = String(CONFIG.SPEEDS.length - 1);
 			this.speedSlider.step = "1";
@@ -1244,9 +1312,9 @@
 				if (speed !== undefined) {
 					State.set("speed", speed);
 					this.video.playbackRate = speed;
-					this.speedBtn.textContent = `$speed}x`;
-					this.speedValue.textContent = `$speed}x`;
-					this.showHint(`$speed}x`);
+					this.speedBtn.textContent = `${speed}x`;
+					this.speedValue.textContent = `${speed}x`;
+					this.showHint(`${speed}x`);
 				}
 			};
 
@@ -1259,10 +1327,10 @@
 				const speed = CONFIG.SPEEDS[nextIdx];
 				State.set("speed", speed);
 				this.video.playbackRate = speed;
-				this.speedBtn.textContent = `$speed}x`;
-				this.speedValue.textContent = `$speed}x`;
+				this.speedBtn.textContent = `${speed}x`;
+				this.speedValue.textContent = `${speed}x`;
 				this.speedSlider.value = String(nextIdx);
-				this.showHint(`$speed}x`);
+				this.showHint(`${speed}x`);
 			});
 
 			popup.append(this.speedValue, this.speedSlider);
@@ -1291,6 +1359,11 @@
 			this.video.addEventListener("volumechange", () => this.updateVolumeUI());
 			this.video.addEventListener("ratechange", () => this.updateSpeedUI());
 
+				// DOCUMENT-LEVEL mouse tracking.
+			// Facebook's overlay divs absorb pointer events, so we cannot rely on
+			// mouseenter/mouseleave on the wrapper.  Instead we track every mousemove
+			// at the document capture phase and compare coordinates against the
+			// wrapper's bounding rect.
 			this._docMouseMoveHandler = (e) => {
 				const x = e.clientX;
 				const y = e.clientY;
@@ -1304,12 +1377,14 @@
 
 				if (isOverWrapper) {
 					this.lastMousePos = { x, y };
-
+					// Show UI and restart the hide timer on every mouse MOVE.
+					// When the mouse stops moving the timer runs out and hides
+					// the controls — even if the cursor is still over the video.
 					this.showUI();
 					this.clearHideTimer();
 					this.scheduleHideUI();
 				} else if (this.lastMousePos !== null) {
-
+					// Mouse has left the wrapper — hide immediately, no timer.
 					this.lastMousePos = null;
 					this.clearHideTimer();
 					this.hideUI();
@@ -1318,6 +1393,8 @@
 
 			document.addEventListener("mousemove", this._docMouseMoveHandler, true);
 
+			// When the cursor enters the panel, cancel any pending hide — the
+			// user is actively interacting with controls.
 			this.panel.addEventListener(
 				"mouseenter",
 				(e) => {
@@ -1328,6 +1405,9 @@
 				true,
 			);
 
+			// When the cursor leaves the panel but is still over the video,
+			// start the hide timer normally. Movement over the video will reset
+			// it; stillness will let it fire.
 			this.panel.addEventListener(
 				"mouseleave",
 				(e) => {
@@ -1337,13 +1417,16 @@
 				true,
 			);
 
+			// Listen for fullscreen changes
 			document.addEventListener("fullscreenchange", () => {
-
+				// Reset mouse position - coordinates are invalid after fullscreen change
 				this.lastMousePos = null;
 
+				// Show UI briefly after transition
 				this.handleMouseActivity();
 				this.checkLayoutSpace();
 
+				// Force hide after delay to reset state properly
 				setTimeout(() => {
 					if (!this.isMouseOverPanel() && !this.isKeyboardFocusActive()) {
 						this.hideUI();
@@ -1352,27 +1435,31 @@
 				}, CONFIG.UI_HIDE_DELAY + 100);
 			});
 
+			// PiP
 			this.video.addEventListener("leavepictureinpicture", () => {
 				this.video.pause();
 			});
 
+			// Resize
 			window.addEventListener("resize", () => this.checkLayoutSpace());
 			if (window.ResizeObserver) {
 				this.resizeObserver = new ResizeObserver(() => this.checkLayoutSpace());
 				this.resizeObserver.observe(this.wrapper);
 			}
 
+			// State changes
 			State.subscribe(() => this.applyState());
 
+			// Prevent auto-hide when hovering over slider popups
 			const sliderPopups = this.panel.querySelectorAll(
-				`.$PLATFORM.classPrefix}-slider-popup`,
+				`.${PLATFORM.classPrefix}-slider-popup`,
 			);
 			sliderPopups.forEach((popup) => {
 				popup.addEventListener("mouseenter", () => {
 					this.clearHideTimer();
 				});
 				popup.addEventListener("mouseleave", () => {
-
+					// Check if still within wrapper before scheduling hide
 					if (this.isMouseOverWrapper()) {
 						this.scheduleHideUI();
 					} else {
@@ -1381,6 +1468,7 @@
 				});
 			});
 
+			// Also prevent hiding when interacting with sliders (drag outside popup)
 			const sliders = this.panel.querySelectorAll('input[type="range"]');
 			sliders.forEach((slider) => {
 				slider.addEventListener("mousedown", () => {
@@ -1388,6 +1476,8 @@
 				});
 			});
 		}
+
+		// --- Control Methods ---
 
 		togglePlay() {
 			if (this.video.paused) {
@@ -1430,7 +1520,7 @@
 			this.muteBtn.innerHTML =
 				muted || vol === 0 ? ICONS.volumeMuted : ICONS.volumeHigh;
 			this.volumeSlider.value = vol;
-			this.volumeValue.textContent = `$Math.round(vol * 100)}%`;
+			this.volumeValue.textContent = `${Math.round(vol * 100)}%`;
 			if (this.autoUnmuteCheckbox) {
 				this.autoUnmuteCheckbox.checked = State.get("autoUnmute");
 			}
@@ -1450,8 +1540,8 @@
 				Math.abs(curr - speed) < Math.abs(prev - speed) ? curr : prev,
 			);
 			const idx = CONFIG.SPEEDS.indexOf(closestSpeed);
-			this.speedBtn.textContent = `$closestSpeed}x`;
-			this.speedValue.textContent = `$closestSpeed}x`;
+			this.speedBtn.textContent = `${closestSpeed}x`;
+			this.speedValue.textContent = `${closestSpeed}x`;
 			this.speedSlider.value = String(
 				idx >= 0 ? idx : CONFIG.SPEEDS.indexOf(1),
 			);
@@ -1479,7 +1569,7 @@
 			this.timeDuration.textContent = Utils.formatTime(duration);
 			if (!this.isDragging) {
 				const percent = (current / duration) * 100;
-				this.progress.style.width = `$percent}%`;
+				this.progress.style.width = `${percent}%`;
 			}
 		}
 
@@ -1537,9 +1627,9 @@
 			const percent = Utils.clamp((e.clientX - rect.left) / rect.width, 0, 1);
 			const time = percent * this.video.duration;
 			this.video.currentTime = time;
-			this.progress.style.width = `$percent * 100}%`;
+			this.progress.style.width = `${percent * 100}%`;
 			this.tooltip.textContent = Utils.formatTime(time);
-			this.tooltip.style.left = `$percent * 100}%`;
+			this.tooltip.style.left = `${percent * 100}%`;
 			this.showHint(Utils.formatTime(time));
 		}
 
@@ -1549,7 +1639,7 @@
 			const percent = Utils.clamp((e.clientX - rect.left) / rect.width, 0, 1);
 			const time = percent * this.video.duration;
 			this.tooltip.textContent = Utils.formatTime(time);
-			this.tooltip.style.left = `$percent * 100}%`;
+			this.tooltip.style.left = `${percent * 100}%`;
 		}
 
 		toggleFullscreen() {
@@ -1575,6 +1665,8 @@
 			}
 		}
 
+		// --- UI Visibility ---
+
 		handleMouseActivity() {
 			if (!this.wrapper) return;
 			this.showUI();
@@ -1582,6 +1674,7 @@
 			this.scheduleHideUI();
 		}
 
+		// Check if mouse is over any interactive control element
 		isMouseOverInteractiveElement() {
 			if (!this.lastMousePos) return false;
 
@@ -1590,17 +1683,19 @@
 
 			if (!elementAtPoint) return false;
 
+			// Check if element is within our panel
 			if (!this.panel.contains(elementAtPoint)) return false;
 
+			// Check if it's an interactive element or child of one
 			const p = PLATFORM.classPrefix;
 			const interactiveSelectors = [
-				`.$p}-btn`,
-				`.$p}-speed-btn`,
-				`.$p}-timeline`,
-				`.$p}-slider-popup`,
-				`.$p}-range-vertical`,
-				`.$p}-auto-unmute-wrap`,
-				`.$p}-auto-unmute-checkbox`,
+				`.${p}-btn`,
+				`.${p}-speed-btn`,
+				`.${p}-timeline`,
+				`.${p}-slider-popup`,
+				`.${p}-range-vertical`,
+				`.${p}-auto-unmute-wrap`,
+				`.${p}-auto-unmute-checkbox`,
 				'input[type="range"]',
 				'input[type="checkbox"]',
 				"button",
@@ -1620,6 +1715,7 @@
 			}
 		}
 
+		// Check if mouse is actually over the panel using element bounds
 		isMouseOverPanel() {
 			if (!this.panel || !this.lastMousePos) return false;
 			const rect = this.panel.getBoundingClientRect();
@@ -1629,6 +1725,7 @@
 			);
 		}
 
+		// Check if mouse is anywhere over the wrapper
 		isMouseOverWrapper() {
 			if (!this.wrapper || !this.lastMousePos) return false;
 			const rect = this.wrapper.getBoundingClientRect();
@@ -1638,6 +1735,7 @@
 			);
 		}
 
+		// True only for keyboard navigation focus
 		isKeyboardFocusActive() {
 			const active = document.activeElement;
 			if (!active || !(active instanceof Element)) return false;
@@ -1654,17 +1752,22 @@
 			this.clearHideTimer();
 
 			this.mouseActivityTimeout = setTimeout(() => {
-
+				// Never hide while dragging the seek bar.
 				if (this.isDragging) {
-
+					// Dragging keeps the UI alive; the drag-end handler will
+					// re-schedule once the user releases.
 					return;
 				}
 
+				// Never hide while the user has keyboard focus on a control.
 				if (this.isKeyboardFocusActive()) {
 					this.scheduleHideUI();
 					return;
 				}
 
+				// Never hide while the cursor is directly over the control panel.
+				// We deliberately do NOT keep the UI alive just because the mouse
+				// is over the video — only movement or panel-hover does that.
 				if (this.isMouseOverPanel()) {
 					this.scheduleHideUI();
 					return;
@@ -1677,6 +1780,7 @@
 		hideUI() {
 			if (!this.wrapper) return;
 
+			// If a control is focused due to mouse click (not focus-visible), blur it so UI can hide.
 			const active = document.activeElement;
 			if (
 				active &&
@@ -1693,8 +1797,10 @@
 				}
 			}
 
+			// Clear the timer
 			this.clearHideTimer();
 
+			// Remove the visible class
 			this.wrapper.classList.remove("ui-visible");
 		}
 
@@ -1738,7 +1844,7 @@
 				this.video.duration,
 			);
 			this.video.currentTime = newTime;
-			this.showHint(`$seconds > 0 ? "+" : ""}$seconds}s`);
+			this.showHint(`${seconds > 0 ? "+" : ""}${seconds}s`);
 		}
 
 		seekFrame(frames) {
@@ -1756,7 +1862,7 @@
 			State.set("volume", newVol);
 			if (newVol > 0) State.set("muted", false);
 			this.applyVolume();
-			this.showHint(`$Math.round(newVol * 100)}%`);
+			this.showHint(`${Math.round(newVol * 100)}%`);
 		}
 
 		cycleSpeed(direction) {
@@ -1768,19 +1874,19 @@
 			State.set("speed", newSpeed);
 			this.video.playbackRate = newSpeed;
 			this.updateSpeedUI();
-			this.showHint(`$newSpeed}x`);
+			this.showHint(`${newSpeed}x`);
 		}
 
 		setSpeedTemporary(speed) {
 			this.originalSpeed = this.video.playbackRate;
 			this.video.playbackRate = speed;
-			this.showHint(`$speed}x ⏩`);
+			this.showHint(`${speed}x ⏩`);
 		}
 
 		restoreSpeed() {
 			if (this.originalSpeed !== undefined) {
 				this.video.playbackRate = this.originalSpeed;
-				this.showHint(`$this.originalSpeed}x`);
+				this.showHint(`${this.originalSpeed}x`);
 				this.originalSpeed = undefined;
 			}
 		}
@@ -1793,6 +1899,7 @@
 				this._seekCleanup();
 			}
 
+			// Remove document-level listener
 			if (this._docMouseMoveHandler) {
 				document.removeEventListener(
 					"mousemove",
@@ -1814,7 +1921,7 @@
 
 			if (this.wrapper) {
 				this.wrapper.classList.remove(
-					`$PLATFORM.classPrefix}-wrapper`,
+					`${PLATFORM.classPrefix}-wrapper`,
 					"video-paused",
 					"ui-visible",
 					"stacked",
@@ -1823,6 +1930,9 @@
 		}
 	}
 
+	// ==========================================================================
+	// SECTION 9: KEYBOARD SHORTCUTS
+	// ==========================================================================
 	const KeyboardHandler = {
 		longPressTimer: null,
 		isLongPress: false,
@@ -1938,7 +2048,7 @@
 					e.preventDefault();
 					const percent = parseInt(key, 10) * 10;
 					video.currentTime = (percent / 100) * video.duration;
-					ui.showHint(`$percent}%`);
+					ui.showHint(`${percent}%`);
 					break;
 				}
 
@@ -1997,6 +2107,9 @@
 		},
 	};
 
+	// ==========================================================================
+	// SECTION 10: MAIN CONTROLLER
+	// ==========================================================================
 	const videoUIMap = new WeakMap();
 	const processedVideos = new WeakSet();
 
@@ -2013,6 +2126,8 @@
 
 			this.processAllVideos();
 
+			// MutationObserver without debounce so we catch videos the instant
+			// they are inserted into the DOM (critical for Facebook's lazy loading)
 			this.observer = new MutationObserver((mutations) => {
 				let hasVideo = false;
 				for (const m of mutations) {
@@ -2024,7 +2139,7 @@
 					}
 					if (hasVideo) break;
 				}
-
+				// Always scan — even attribute/subtree changes can reveal videos
 				this.processAllVideos();
 			});
 
@@ -2047,11 +2162,14 @@
 				}, 50);
 			}
 
+			// Periodic poll: catches videos that slip past the MutationObserver
+			// (e.g. FB injecting videos via shadow DOM or cross-frame techniques)
 			this._pollInterval = setInterval(
 				() => this.processAllVideos(),
 				CONFIG.POLL_INTERVAL,
 			);
 
+			// Re-apply volume/speed when returning to tab
 			document.addEventListener("visibilitychange", () => {
 				if (document.visibilityState === "visible") {
 					document.querySelectorAll("video").forEach((v) => {
@@ -2071,7 +2189,7 @@
 		},
 
 		destroyAll() {
-
+			// Destroy every active UI tracked in videoUIMap.
 			document.querySelectorAll("video").forEach((video) => {
 				const ui = videoUIMap.get(video);
 				if (ui) {
@@ -2081,25 +2199,32 @@
 				processedVideos.delete(video);
 			});
 
+			// Facebook sometimes keeps Reel DOM nodes mounted during the
+			// transition back to the feed, so aggressively clean up any
+			// leftover injected DOM/classes regardless of tracking state.
+
+			// Remove all injected panels/hints/tooltips
 			document
 				.querySelectorAll(
-					`.$PLATFORM.classPrefix}-panel, ` +
-					`.$PLATFORM.classPrefix}-hint, ` +
-					`.$PLATFORM.classPrefix}-tooltip`
+					`.${PLATFORM.classPrefix}-panel, ` +
+					`.${PLATFORM.classPrefix}-hint, ` +
+					`.${PLATFORM.classPrefix}-tooltip`
 				)
 				.forEach((el) => el.remove());
 
+			// Remove wrapper/UI classes from all elements
 			document
-				.querySelectorAll(`.$PLATFORM.classPrefix}-wrapper`)
+				.querySelectorAll(`.${PLATFORM.classPrefix}-wrapper`)
 				.forEach((el) => {
 					el.classList.remove(
-						`$PLATFORM.classPrefix}-wrapper`,
+						`${PLATFORM.classPrefix}-wrapper`,
 						"video-paused",
 						"ui-visible",
 						"stacked",
 					);
 				});
 
+			// Remove any inline positioning we added
 			document.querySelectorAll("[data-video-id]").forEach((el) => {
 				if (el.style.position === "relative") {
 					el.style.removeProperty("position");
@@ -2108,18 +2233,19 @@
 		},
 
 		processVideo(video, retryCount = 0) {
-
+			// Abort immediately if URL changed (e.g. user closed Reel during a retry loop)
 			if (!isFacebookInjectionAllowed()) return;
 
 			if (processedVideos.has(video)) return;
 
+			// Skip tiny/hidden videos (likely thumbnails, ads, or not-yet-laid-out)
 			const rect = video.getBoundingClientRect();
 			const hasSize =
 				rect.width >= CONFIG.MIN_VIDEO_WIDTH &&
 				rect.height >= CONFIG.MIN_VIDEO_HEIGHT;
 
 			if (!hasSize) {
-				if (retryCount >= CONFIG.ZERO_RECT_RETRIES) return;
+				if (retryCount >= CONFIG.ZERO_RECT_RETRIES) return; // give up
 				setTimeout(() => {
 					if (document.contains(video)) {
 						this.processVideo(video, retryCount + 1);
@@ -2128,32 +2254,44 @@
 				return;
 			}
 
+			// Find the appropriate wrapper
 			const wrapper = PLATFORM.findVideoWrapper(video);
 			if (!wrapper) return;
 
-			if (wrapper.querySelector(`.$PLATFORM.classPrefix}-panel`)) return;
+			// Don't process if wrapper already has our controls
+			if (wrapper.querySelector(`.${PLATFORM.classPrefix}-panel`)) return;
 
 			processedVideos.add(video);
 
+			// Enforce position on wrapper so absolute children (panel) work correctly.
+			// For Facebook's data-video-id container the position is already set via
+			// inline styles or FB's own CSS, but we enforce it anyway as a safety net.
+			// We do this BEFORE createUI so the panel's absolute positioning resolves
+			// against the right containing block from the very first paint.
 			const wPos = getComputedStyle(wrapper).position;
 			if (wPos === "static") {
 				wrapper.style.position = "relative";
 			}
 
+			// Also ensure the wrapper has explicit dimensions if it somehow has none
+			// (shouldn't happen with data-video-id which has inline style, but belt+suspenders)
 			const wRect = wrapper.getBoundingClientRect();
 			if (wRect.width < CONFIG.MIN_VIDEO_WIDTH || wRect.height < CONFIG.MIN_VIDEO_HEIGHT) {
 				const vRect = video.getBoundingClientRect();
 				if (vRect.width > 0 && vRect.height > 0) {
-					wrapper.style.width = wrapper.style.width || `$vRect.width}px`;
-					wrapper.style.height = wrapper.style.height || `$vRect.height}px`;
+					wrapper.style.width = wrapper.style.width || `${vRect.width}px`;
+					wrapper.style.height = wrapper.style.height || `${vRect.height}px`;
 				}
 			}
 
+			// Apply initial state
 			State.applyToVideo(video);
 
+			// Create UI
 			const ui = new VideoControlsUI(video, wrapper);
 			videoUIMap.set(video, ui);
 
+			// Cleanup when video is removed
 			const cleanupObserver = new MutationObserver(() => {
 				if (!document.contains(video)) {
 					ui.destroy();
@@ -2172,14 +2310,20 @@
 		},
 	};
 
+	// ==========================================================================
+	// SECTION 11: ADDITIONAL FEATURES
+	// ==========================================================================
+
+	// Double-click to fullscreen
 	document.addEventListener(
 		"dblclick",
 		(e) => {
-			const wrapper = e.target.closest(`.$PLATFORM.classPrefix}-wrapper`);
+			const wrapper = e.target.closest(`.${PLATFORM.classPrefix}-wrapper`);
 			if (!wrapper) return;
 
+			// Don't intercept double-clicks on our controls or native platform buttons
 			if (
-				e.target.closest(`.$PLATFORM.classPrefix}-panel`) ||
+				e.target.closest(`.${PLATFORM.classPrefix}-panel`) ||
 				e.target.closest("button") ||
 				e.target.closest('[role="button"]')
 			) {
@@ -2199,10 +2343,11 @@
 		{ capture: true },
 	);
 
+	// Scroll wheel volume control (when hovering video + shift)
 	document.addEventListener(
 		"wheel",
 		(e) => {
-			const wrapper = e.target.closest(`.$PLATFORM.classPrefix}-wrapper`);
+			const wrapper = e.target.closest(`.${PLATFORM.classPrefix}-wrapper`);
 			if (wrapper && e.shiftKey) {
 				const video = wrapper.querySelector("video");
 				if (video) {
@@ -2217,10 +2362,25 @@
 		{ passive: false },
 	);
 
+	// ==========================================================================
+	// SECTION 12: INITIALIZATION
+	// ==========================================================================
+
+	// === FAST-PATH BOOTSTRAP ===
+	// @run-at document-start means we're injected before the DOM is built.
+	// We start a MutationObserver on document.documentElement immediately so
+	// we catch video elements the instant Facebook's parser creates them —
+	// no waiting for DOMContentLoaded.
+	//
+	// Full init() (State, AudioEngine, Styles, KeyboardHandler, polling) runs
+	// as soon as we have a <head> to inject the stylesheet into, which is
+	// typically only a few milliseconds into parsing.
+
 	let _earlyInitDone = false;
 
 	const _earlyObserver = new MutationObserver(() => {
-
+		// We need document.head to inject CSS and document.body for the observer.
+		// Both appear very early in parsing — watch for them.
 		if (!document.head || !document.body) return;
 		if (_earlyInitDone) return;
 		_earlyInitDone = true;
@@ -2234,28 +2394,42 @@
 		subtree: true,
 	});
 
+	// Fallback: if head+body already exist (readyState != "loading"), init now.
 	if (document.head && document.body && !_earlyInitDone) {
 		_earlyInitDone = true;
 		_earlyObserver.disconnect();
 		MainController.init();
 	}
 
+	// Belt-and-suspenders: DOMContentLoaded in case the early observer somehow
+	// missed the window (shouldn't happen, but costs nothing).
 	document.addEventListener("DOMContentLoaded", () => {
 		if (!_earlyInitDone) {
 			_earlyInitDone = true;
 			_earlyObserver.disconnect();
 			MainController.init();
 		} else {
-
+			// Already initialised — just scan for any videos that loaded
+			// during the parsing phase before our observer caught them.
 			MainController.processAllVideos();
 		}
 	});
 
+	// Post-load scans catch lazy-loaded videos (Facebook's virtualised feed).
 	window.addEventListener("load", () => {
 		MainController.processAllVideos();
 		setTimeout(() => MainController.processAllVideos(), 1000);
 		setTimeout(() => MainController.processAllVideos(), 3000);
 	});
+
+	// === SPA NAVIGATION WATCHER ===
+	// Facebook uses pushState/replaceState for all navigation — there is never
+	// a real page reload when clicking a Reel from the feed.  We intercept both
+	// history methods and the popstate event so we catch every URL transition.
+	//
+	// On navigation we do NOT require the URL to contain "/reel" — a video can
+	// appear anywhere (feed, watch, groups, etc.) and our size-based filter in
+	// processVideo already ensures we only inject into real video players.
 
 	(function patchHistory() {
 		const _push = history.pushState.bind(history);
@@ -2263,12 +2437,19 @@
 
 		const onNavigate = () => {
 			if (isFacebookInjectionAllowed()) {
-
+				// Navigated TO a reel — scan for videos to inject.
 				setTimeout(() => MainController.processAllVideos(), 100);
 				setTimeout(() => MainController.processAllVideos(), 600);
 				setTimeout(() => MainController.processAllVideos(), 2000);
 			} else {
-
+				// Navigated AWAY from a reel.
+				//
+				// Facebook keeps Reel DOM nodes alive during the closing animation
+				// and may later recycle them into the feed.  A single immediate
+				// cleanup is therefore too early on the first close transition.
+				//
+				// Run cleanup repeatedly over ~2 seconds so we catch the DOM after
+				// Facebook finishes reparenting/reusing it.
 				MainController.destroyAll();
 			}
 		};
@@ -2287,356 +2468,301 @@
 	})();
 })();
 
+
 (function () {
     'use strict';
 
+    const postIdPattern = /^\/p\/([^/]+)\//;
+    const postUrlPattern = /instagram\.com\/p\/[\w-]+\//;
     const disableNewUrlFetchMethod = false;
-    const prefetchAndAttachLink = false;
     const hoverToFetchAndAttachLink = true;
-    const replaceJpegWithJpg = false;
-
     const postFilenameTemplate = '%id%-%datetime%-%medianame%';
     const storyFilenameTemplate = postFilenameTemplate;
-
     const datetimeTemplate = '%y%%m%%d%_%H%%M%%S%';
 
-    const postIdPattern = /^\/p\/([^/]+)\
-    const postUrlPattern = /instagram\.com\/p\/[\w-]+\
+    const style = document.createElement('style');
+    style.id = 'ar-ig-download-styles';
+    style.textContent = `
+        .ar-ig-actions{display:inline-flex;align-items:center;gap:6px;margin-left:6px;vertical-align:middle;position:relative;z-index:5;flex-shrink:0}
+        .ar-ig-btn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:none;border-radius:8px;background:transparent;cursor:pointer;color:inherit;opacity:.9}
+        .ar-ig-btn:hover{opacity:1;background:rgba(128,128,128,.15)}
+        .ar-ig-btn svg{width:22px;height:22px;display:block;pointer-events:none}
+        article video,article img[src],section video,section img[src]{pointer-events:auto!important}
+        div._aagw,div[class*="_aagw"]{pointer-events:none!important}
+    `;
+    (document.head || document.documentElement).appendChild(style);
 
-    var svgDownloadBtn = `<svg version="1.1" id="Capa_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" height="24" width="24"
-     viewBox="0 0 477.867 477.867" style="fill:%color;" xml:space="preserve">
-    <g>
-        <path d="M443.733,307.2c-9.426,0-17.067,7.641-17.067,17.067v102.4c0,9.426-7.641,17.067-17.067,17.067H68.267
-            c-9.426,0-17.067-7.641-17.067-17.067v-102.4c0-9.426-7.641-17.067-17.067-17.067s-17.067,7.641-17.067,17.067v102.4
-            c0,28.277,22.923,51.2,51.2,51.2H409.6c28.277,0,51.2-22.923,51.2-51.2v-102.4C460.8,314.841,453.159,307.2,443.733,307.2z"/>
-    </g>
-    <g>
-        <path d="M335.947,295.134c-6.614-6.387-17.099-6.387-23.712,0L256,351.334V17.067C256,7.641,248.359,0,238.933,0
-            s-17.067,7.641-17.067,17.067v334.268l-56.201-56.201c-6.78-6.548-17.584-6.36-24.132,0.419c-6.388,6.614-6.388,17.099,0,23.713
-            l85.333,85.333c6.657,6.673,17.463,6.687,24.136,0.031c0.01-0.01,0.02-0.02,0.031-0.031l85.333-85.333
-            C342.915,312.486,342.727,301.682,335.947,295.134z"/>
-    </g>
-</svg>`;
+    document.addEventListener(
+        'contextmenu',
+        (e) => {
+            const media = e.target.closest(
+                'article video, article img, section video, section img, main video, main img'
+            );
+            if (media) e.stopImmediatePropagation();
+        },
+        true
+    );
 
-    var svgNewtabBtn = `<svg id="Capa_1" style="fill:%color;" viewBox="0 0 482.239 482.239" xmlns="http://www.w3.org/2000/svg" height="24" width="24">
-    <path d="m465.016 0h-344.456c-9.52 0-17.223 7.703-17.223 17.223v86.114h-86.114c-9.52 0-17.223 7.703-17.223 17.223v344.456c0 9.52 7.703 17.223 17.223 17.223h344.456c9.52 0 17.223-7.703 17.223-17.223v-86.114h86.114c9.52 0 17.223-7.703 17.223-17.223v-344.456c0-9.52-7.703-17.223-17.223-17.223zm-120.56 447.793h-310.01v-310.01h310.011v310.01zm103.337-103.337h-68.891v-223.896c0-9.52-7.703-17.223-17.223-17.223h-223.896v-68.891h310.011v310.01z"/>
-</svg>`;
+    const svgDownload = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zm0 9H5v2h14v-2z"/></svg>`;
+    const svgOpen = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 19H5V5h7V3H5a2 2 0 00-2 2v14a2 2 0 002 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>`;
 
-    var preUrl = "";
+    let preUrl = '';
 
-    document.addEventListener('keydown', keyDownHandler);
-
-    function keyDownHandler(event) {
-        if (window.location.href === 'https://www.instagram.com/') return;
-
-        const mockEventTemplate = {
-            stopPropagation: function () { },
-            preventDefault: function () { }
-        };
-
-        if (event.altKey && (event.code === 'KeyK' || event.key == 'k')) {
-            let buttons = document.getElementsByClassName('download-btn');
-            if (buttons.length > 0) {
-                let mockEvent = { ...mockEventTemplate };
-                mockEvent.currentTarget = buttons[buttons.length - 1];
-                if (prefetchAndAttachLink || hoverToFetchAndAttachLink) onMouseInHandler(mockEvent);
-                onClickHandler(mockEvent);
+    function findActionHost(article) {
+        if (!article) return null;
+        const sections = article.querySelectorAll('section');
+        for (let i = sections.length - 1; i >= 0; i--) {
+            const sec = sections[i];
+            const candidates = [
+                sec.querySelector(':scope > div > div'),
+                sec.querySelector(':scope > div'),
+                sec,
+            ];
+            for (const row of candidates) {
+                if (!row) continue;
+                const buttons = row.querySelectorAll('[role="button"]');
+                if (buttons.length >= 3) return row;
             }
         }
-        if (event.altKey && (event.code === 'KeyI' || event.key == 'i')) {
-            let buttons = document.getElementsByClassName('newtab-btn');
-            if (buttons.length > 0) {
-                let mockEvent = { ...mockEventTemplate };
-                mockEvent.currentTarget = buttons[buttons.length - 1];
-                if (prefetchAndAttachLink || hoverToFetchAndAttachLink) onMouseInHandler(mockEvent);
-                onClickHandler(mockEvent);
-            }
-        }
-
-        if (event.altKey && (event.code === 'KeyL' || event.key == 'l')) {
-
-            let buttons = document.getElementsByClassName('_9zm2');
-            if (buttons.length > 0) {
-                buttons[0].click();
-            }
-        }
-
-        if (event.altKey && (event.code === 'KeyJ' || event.key == 'j')) {
-
-            let buttons = document.getElementsByClassName('_9zm0');
-            if (buttons.length > 0) {
-                buttons[0].click();
-            }
-        }
-    }
-
-    function isPostPage() {
-        return Boolean(window.location.href.match(postUrlPattern));
-    }
-
-    function queryHas(root, selector, has) {
-        let nodes = root.querySelectorAll(selector);
-        for (let i = 0; i < nodes.length; ++i) {
-            let currentNode = nodes[i];
-            if (currentNode.querySelector(has)) {
-                return currentNode;
-            }
+        const saveSvg = article.querySelector(
+            'svg[aria-label="Save"], svg[aria-label="Guardar"], svg[aria-label="Enregistrer"]'
+        );
+        if (saveSvg) {
+            return (
+                saveSvg.closest('section > div > div') ||
+                saveSvg.closest('motion.div')?.parentElement ||
+                saveSvg.parentElement?.parentElement
+            );
         }
         return null;
     }
 
-    var checkExistTimer = setInterval(function () {
-        const curUrl = window.location.href;
-        const savePostSelector = 'article *:not(li)>*>*>*>div:not([class])>div[role="button"]:not([style]):not([tabindex="-1"])';
-        const storySelector = 'section > *:not(main) header div>svg:not([aria-label=""])';
-        const profileSelector = 'header section svg circle';
-        const playSvgPathSelector = 'path[d="M5.888 22.5a3.46 3.46 0 0 1-1.721-.46l-.003-.002a3.451 3.451 0 0 1-1.72-2.982V4.943a3.445 3.445 0 0 1 5.163-2.987l12.226 7.059a3.444 3.444 0 0 1-.001 5.967l-12.22 7.056a3.462 3.462 0 0 1-1.724.462Z"]';
-        const pauseSvgPathSelector = 'path[d="M15 1c-3.3 0-6 1.3-6 3v40c0 1.7 2.7 3 6 3s6-1.3 6-3V4c0-1.7-2.7-3-6-3zm18 0c-3.3 0-6 1.3-6 3v40c0 1.7 2.7 3 6 3s6-1.3 6-3V4c0-1.7-2.7-3-6-3z"]';
+    function findProfileHost() {
+        const header = document.querySelector('header section');
+        if (!header) return null;
+        return (
+            header.querySelector('div[class*="avatar"]')?.parentElement ||
+            header.querySelector('img')?.closest('motion.div')?.parentElement ||
+            header.querySelector('canvas')?.parentElement
+        );
+    }
 
-        let rgb = getComputedStyle(document.body).backgroundColor.match(/[.?\d]+/g);
-        let iconColor = (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) <= 150 ? 'white' : 'black'
+    function createBtn(svg, className, title) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `ar-ig-btn ar-ig-${className}`;
+        btn.title = title;
+        btn.setAttribute('aria-label', title);
+        btn.innerHTML = svg;
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onClickHandler({ currentTarget: btn });
+        });
+        if (hoverToFetchAndAttachLink) {
+            btn.addEventListener('mouseenter', () => onMouseInHandler({ currentTarget: btn }));
+        }
+        return btn;
+    }
 
+    function injectActions(host, kind) {
+        if (!host || host.querySelector('.ar-ig-actions')) return;
+        const bar = document.createElement('div');
+        bar.className = 'ar-ig-actions';
+        bar.dataset.arIgKind = kind;
+        bar.appendChild(createBtn(svgOpen, 'open', 'Open media'));
+        bar.appendChild(createBtn(svgDownload, 'download', 'Download'));
+        host.appendChild(bar);
+    }
+
+    function scan() {
+        const curUrl = location.href;
         if (preUrl !== curUrl) {
-            while (document.getElementsByClassName('custom-btn').length !== 0) {
-                document.getElementsByClassName('custom-btn')[0].remove();
-            }
+            document.querySelectorAll('.ar-ig-actions').forEach((el) => el.remove());
         }
-
-        let articleList = document.querySelectorAll('article');
-        for (let i = 0; i < articleList.length; i++) {
-            let buttonAnchor = (Array.from(articleList[i].querySelectorAll(savePostSelector))).pop();
-            if (buttonAnchor && articleList[i].getElementsByClassName('custom-btn').length === 0) {
-                addCustomBtn(buttonAnchor, iconColor, append2Post);
-            }
-        }
-
-        if (isPostPage()) {
-            let savebtn = queryHas(document, 'div[role="button"] > div[role="button"]:not([style])', 'polygon[points="20 21 12 13.44 4 21 4 3 20 3 20 21"]') || queryHas(document, 'div[role="button"] > div[role="button"]:not([style])', 'path[d="M20 22a.999.999 0 0 1-.687-.273L12 14.815l-7.313 6.912A1 1 0 0 1 3 21V3a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1Z"]');
-            if (document.getElementsByClassName('custom-btn').length === 0) {
-                if (savebtn.parentNode.querySelector('svg')) {
-                    addCustomBtn(savebtn.parentNode.querySelector('svg'), iconColor, append2IndependentPost);
-                }
-            }
-        }
-
-        if (document.getElementsByClassName('custom-btn').length === 0 && !curUrl.includes("stor")) {
-            if (document.querySelector(profileSelector)) {
-                addCustomBtn(document.querySelector(profileSelector), iconColor, append2Header);
-            }
-        }
-
-        if (document.getElementsByClassName('custom-btn').length === 0) {
-            let playPauseSvg = queryHas(document, 'svg', playSvgPathSelector) || queryHas(document, 'svg', pauseSvgPathSelector);
-            if (playPauseSvg) {
-                let buttonDiv = playPauseSvg.parentNode;
-                addCustomBtn(buttonDiv, 'white', append2Story);
-            }
-        }
-
         preUrl = curUrl;
-    }, 500);
 
-    function append2Post(node, btn) {
-        node.append(btn);
-    }
+        document.querySelectorAll('article').forEach((article) => {
+            const host = findActionHost(article);
+            if (host) injectActions(host, 'post');
+        });
 
-    function append2IndependentPost(node, btn) {
-        node.parentNode.parentNode.append(btn);
-    }
+        if (location.pathname.includes('/stories/')) {
+            const storyHost =
+                document.querySelector('section [role="button"]')?.parentElement?.parentElement;
+            if (storyHost && !document.querySelector('.ar-ig-actions')) {
+                injectActions(storyHost, 'story');
+            }
+        }
 
-    function append2Header(node, btn) {
-        node.parentNode.parentNode.parentNode.appendChild(btn, node.parentNode.parentNode);
-    }
-
-    function append2Story(node, btn) {
-        node.parentNode.parentNode.parentNode.append(btn);
-    }
-
-    function addCustomBtn(node, iconColor, appendNode) {
-
-        let newtabBtn = createCustomBtn(svgNewtabBtn, iconColor, 'newtab-btn', '16px');
-        appendNode(node, newtabBtn);
-
-        let downloadBtn = createCustomBtn(svgDownloadBtn, iconColor, 'download-btn', '14px');
-        appendNode(node, downloadBtn);
-
-        if (prefetchAndAttachLink) {
-            onMouseInHandler({ currentTarget: newtabBtn });
-            onMouseInHandler({ currentTarget: downloadBtn });
+        if (
+            !document.querySelector('.ar-ig-actions') &&
+            location.pathname.match(/^\/[^/]+\/?$/) &&
+            !location.pathname.includes('/p/')
+        ) {
+            const ph = findProfileHost();
+            if (ph) injectActions(ph, 'profile');
         }
     }
 
-    function createCustomBtn(svg, iconColor, className, marginLeft) {
-        let newBtn = document.createElement('a');
-        newBtn.innerHTML = svg.replace('%color', iconColor);
-        newBtn.setAttribute('class', 'custom-btn ' + className);
-        newBtn.setAttribute('target', '_blank');
-        newBtn.setAttribute('style', 'cursor: pointer;margin-left: ' + marginLeft + ';margin-top: 8px;z-index: 999;');
-        newBtn.onclick = onClickHandler;
-        if (hoverToFetchAndAttachLink) newBtn.onmouseenter = onMouseInHandler;
-        if (className.includes('newtab')) {
-            newBtn.setAttribute('title', 'Open in new tab');
-        } else {
-            newBtn.setAttribute('title', 'Download');
+    const observer = new MutationObserver(() => scan());
+    scan();
+    if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+
+    function isPostPage() {
+        return postUrlPattern.test(location.href);
+    }
+
+    function queryHas(root, selector, has) {
+        const nodes = root.querySelectorAll(selector);
+        for (const node of nodes) {
+            if (node.querySelector(has)) return node;
         }
-        return newBtn;
+        return null;
     }
 
     function onClickHandler(e) {
-
-        let target = e.currentTarget;
-        e.stopPropagation();
-        e.preventDefault();
-        if (window.location.pathname.includes('stories')) {
-            storyOnClicked(target);
-        } else if (document.querySelector('header') && document.querySelector('header').contains(target)) {
-            profileOnClicked(target);
-        } else {
-            postOnClicked(target);
-        }
+        const target = e.currentTarget;
+        if (location.pathname.includes('stories')) storyOnClicked(target);
+        else if (target.closest('header')) profileOnClicked(target);
+        else postOnClicked(target);
     }
 
     function onMouseInHandler(e) {
-        let target = e.currentTarget;
-        if (!prefetchAndAttachLink && !hoverToFetchAndAttachLink) return;
-        if (window.location.pathname.includes('stories')) {
-            storyOnMouseIn(target);
-        } else if (document.querySelector('header') && document.querySelector('header').contains(target)) {
-            profileOnMouseIn(target);
-        } else {
-            postOnMouseIn(target);
-        }
+        const target = e.currentTarget;
+        if (location.pathname.includes('stories')) storyOnMouseIn(target);
+        else if (target.closest('header')) profileOnMouseIn(target);
+        else postOnMouseIn(target);
     }
 
-    function profileOnMouseIn(target) {
-        let url = profileGetUrl(target);
-        target.setAttribute('href', url);
+    async function profileOnMouseIn(target) {
+        target.dataset.arMediaUrl = profileGetUrl();
     }
 
     function profileOnClicked(target) {
-
-        let url = profileGetUrl(target);
-
-        if (url.length > 0) {
-
-            if (target.getAttribute('class').includes('download-btn')) {
-
-                const filename = document.querySelector('header h2').textContent;
-                downloadResource(url, filename);
-            } else {
-
-                openResource(url);
-            }
-        }
+        const url = profileGetUrl();
+        if (!url) return;
+        if (target.classList.contains('ar-ig-download')) {
+            const filename = document.querySelector('header h2,h1')?.textContent?.trim() || 'profile';
+            downloadResource(url, filename);
+        } else openResource(url);
     }
 
-    function profileGetUrl(target) {
-        let img = document.querySelector('header img');
-        let url = img.getAttribute('src');
-        return url;
+    function profileGetUrl() {
+        const img = document.querySelector('header img[src]');
+        return img?.getAttribute('src') || '';
     }
 
     async function postOnMouseIn(target) {
-        let articleNode = postGetArticleNode(target);
-        let { url } = await postGetUrl(target, articleNode);
-        target.setAttribute('href', url);
+        const articleNode = postGetArticleNode(target);
+        const { url } = await postGetUrl(target, articleNode);
+        if (url) target.dataset.arMediaUrl = url;
     }
 
     async function postOnClicked(target) {
         try {
-
-            let articleNode = postGetArticleNode(target);
-            let { url, mediaIndex } = await postGetUrl(target, articleNode);
-
-            if (url.length > 0) {
-
-                if (target.getAttribute('class').includes('download-btn')) {
-                    let mediaName = url
-                        .split('?')[0]
-                        .split('\\')
-                        .pop()
-                        .split('/')
-                        .pop();
-                    mediaName = mediaName.substring(0, mediaName.lastIndexOf('.'));
-                    let datetime = new Date(articleNode.querySelector('time').getAttribute('datetime'));
-                    let posterName = articleNode.querySelector('header a') || findPostName(articleNode);
-                    posterName = posterName.getAttribute('href').replace(/\
-                    let postId = findPostId(articleNode);
-                    let filename = filenameFormat(postFilenameTemplate, posterName, datetime, mediaName, postId, mediaIndex);
-                    downloadResource(url, filename);
-                } else {
-
-                    openResource(url);
-                }
+            const articleNode = postGetArticleNode(target);
+            const { url, mediaIndex } = await postGetUrl(target, articleNode);
+            if (!url) {
+                console.warn('[Instagram_Rabbit] No media URL found');
+                return;
             }
-        } catch (e) {
-            console.log(`Uncatched in postOnClicked(): $e}\n$e.stack}`);
-            return null;
+            if (target.classList.contains('ar-ig-download')) {
+                let mediaName = url.split('?')[0].split('/').pop() || 'media';
+                mediaName = mediaName.includes('.')
+                    ? mediaName.substring(0, mediaName.lastIndexOf('.'))
+                    : mediaName;
+                const timeEl = articleNode.querySelector('time');
+                const datetime = timeEl
+                    ? new Date(timeEl.getAttribute('datetime'))
+                    : new Date();
+                let posterName = articleNode.querySelector('header a[href^="/"]');
+                posterName = posterName
+                    ? posterName.getAttribute('href').replace(/\//g, '')
+                    : 'unknown';
+                const postId = findPostId(articleNode) || 'post';
+                const filename = filenameFormat(
+                    postFilenameTemplate,
+                    posterName,
+                    datetime,
+                    mediaName,
+                    postId,
+                    mediaIndex
+                );
+                downloadResource(url, filename);
+            } else {
+                openResource(url);
+            }
+        } catch (err) {
+            console.error('[Instagram_Rabbit]', err);
         }
     }
 
     function postGetArticleNode(target) {
-        let articleNode = target;
-        while (articleNode && articleNode.tagName !== 'ARTICLE' && articleNode.tagName !== 'MAIN') {
-            articleNode = articleNode.parentNode;
+        let node = target;
+        while (node && node.tagName !== 'ARTICLE' && node.tagName !== 'MAIN') {
+            node = node.parentNode;
         }
-        return articleNode;
+        return node || document.querySelector('article') || document.body;
     }
 
     async function postGetUrl(target, articleNode) {
-
         let list = articleNode.querySelectorAll('li[style][class]');
         let url = null;
         let mediaIndex = 0;
         if (list.length === 0) {
-
             if (!disableNewUrlFetchMethod) url = await getUrlFromInfoApi(articleNode);
-            if (url === null) {
-                let videoElem = articleNode.querySelector('video');
+            if (!url) {
+                const videoElem = articleNode.querySelector('video');
                 if (videoElem) {
-
                     url = videoElem.getAttribute('src');
-                    if (videoElem.hasAttribute('videoURL')) {
+                    if (videoElem.getAttribute('videoURL')) {
                         url = videoElem.getAttribute('videoURL');
-                    } else if (url === null || url.includes('blob')) {
+                    } else if (!url || url.includes('blob')) {
                         url = await fetchVideoURL(articleNode, videoElem);
                     }
-                } else if (articleNode.querySelector('article  div[role] div > img')) {
-
-                    url = articleNode.querySelector('article  div[role] div > img').getAttribute('src');
                 } else {
-                    console.log('Err: not find media at handle post single');
+                    const img =
+                        articleNode.querySelector('article img[src]') ||
+                        articleNode.querySelector('img[srcset], img[src]');
+                    url = img?.getAttribute('src') || img?.srcset?.split(' ')[0];
                 }
             }
         } else {
-
             const postView = location.pathname.startsWith('/p/');
-            let dotsElements = [...articleNode.querySelectorAll(`div._acnb`)];
-            mediaIndex = [...dotsElements].reduce((result, element, index) => (element.classList.length === 2 ? index : result), null);
-            if (mediaIndex === null) throw 'Cannot find the media index';
-
+            const dotsElements = [...articleNode.querySelectorAll('motion.div._acnb, div._acnb')];
+            mediaIndex = [...dotsElements].reduce(
+                (result, element, index) => (element.classList.length >= 2 ? index : result),
+                0
+            );
+            if (mediaIndex === null) mediaIndex = 0;
             if (!disableNewUrlFetchMethod) url = await getUrlFromInfoApi(articleNode, mediaIndex);
-            if (url === null) {
-                const listElements = [...articleNode.querySelectorAll(`:scope > div > div:nth-child($postView ? 1 : 2}) > div > div:nth-child(1) ul li[style*="translateX"]`)];
-                const listElementWidth = Math.max(...listElements.map(element => element.clientWidth));
-
+            if (!url) {
+                const nth = postView ? 1 : 2;
+                const listElements = [
+                    ...articleNode.querySelectorAll(
+                        `:scope > div > div:nth-child(${nth}) > div > div:nth-child(1) ul li[style*="translateX"]`
+                    ),
+                ];
+                const listElementWidth = Math.max(
+                    ...listElements.map((element) => element.clientWidth),
+                    1
+                );
                 const positionsMap = listElements.reduce((result, element) => {
-                    const position = Math.round(Number(element.style.transform.match(/-?(\d+)/)[1]) / listElementWidth);
+                    const m = element.style.transform.match(/-?(\d+)/);
+                    const position = m ? Math.round(Number(m[1]) / listElementWidth) : 0;
                     return { ...result, [position]: element };
                 }, {});
-
-                const node = positionsMap[mediaIndex];
-                if (node.querySelector('video')) {
-
-                    let videoElem = node.querySelector('video');
+                const node = positionsMap[mediaIndex] || listElements[mediaIndex];
+                if (node?.querySelector('video')) {
+                    const videoElem = node.querySelector('video');
                     url = videoElem.getAttribute('src');
-                    if (videoElem.hasAttribute('videoURL')) {
+                    if (videoElem.getAttribute('videoURL')) {
                         url = videoElem.getAttribute('videoURL');
-                    } else if (url === null || url.includes('blob')) {
+                    } else if (!url || url.includes('blob')) {
                         url = await fetchVideoURL(articleNode, videoElem);
                     }
-                } else if (node.querySelector('img')) {
-
+                } else if (node?.querySelector('img')) {
                     url = node.querySelector('img').getAttribute('src');
                 }
             }
@@ -2644,53 +2770,43 @@
         return { url, mediaIndex };
     }
 
-    function findHighlightsIndex() {
-        let currentDivProgressbarDiv = document.querySelector('div[style^="transform"]').parentElement;
-        let progressbarRootDiv = currentDivProgressbarDiv.parentElement;
-        let progressbarDivs = progressbarRootDiv.children;
-        return Array.from(progressbarDivs).indexOf(currentDivProgressbarDiv);
-    }
-
     let infoCache = {};
     let mediaIdCache = {};
-    async function getUrlFromInfoApi(articleNode, mediaIdx = 0) {
 
+    async function getUrlFromInfoApi(articleNode, mediaIdx = 0) {
         try {
             const appIdPattern = /"X-IG-App-ID":"([\d]+)"/;
-            const mediaIdPattern = /instagram:\/\/media\?id=(\d+)|["' ]media_id["' ]:["' ](\d+)["' ]/;
+            const mediaIdPattern =
+                /instagram:\/\/media\?id=(\d+)|["' ]media_id["' ]:["' ](\d+)["' ]/;
+
             function findAppId() {
-                let bodyScripts = document.querySelectorAll("body > script");
-                for (let i = 0; i < bodyScripts.length; ++i) {
-                    let match = bodyScripts[i].text.match(appIdPattern);
+                const bodyScripts = document.querySelectorAll('body > script');
+                for (const script of bodyScripts) {
+                    const match = script.text.match(appIdPattern);
                     if (match) return match[1];
                 }
-                console.log("Cannot find app id");
                 return null;
             }
 
             async function findMediaId() {
-                // method 1: extract from url.
                 function method1() {
-                    let href = window.location.href;
-                    let match = href.match(/www.instagram.com\/stories\/[^\/]+\/(\d+)/);
+                    const href = location.href;
+                    const match = href.match(/www.instagram.com\/stories\/[^/]+\/(\d+)/);
                     if (!href.includes('highlights') && match) return match[1];
+                    return null;
                 }
 
-                // method 3
                 async function method3() {
-                    let postId = await findPostId(articleNode);
-                    if (!postId) {
-                        return null;
-                    }
-
+                    const postId = await findPostId(articleNode);
+                    if (!postId) return null;
                     if (!(postId in mediaIdCache)) {
-                        let postUrl = `https://www.instagram.com/p/${postId}/`;
-                        let resp = await fetch(postUrl);
-                        let text = await resp.text();
-                        let idMatch = text ? text.match(mediaIdPattern) : [];
+                        const postUrl = `https://www.instagram.com/p/${postId}/`;
+                        const resp = await fetch(postUrl);
+                        const text = await resp.text();
+                        const idMatch = text ? text.match(mediaIdPattern) : [];
                         let mediaId = null;
-                        for (let i = 0; i < idMatch.length; ++i) {
-                            if (idMatch[i]) mediaId = idMatch[i];
+                        for (const part of idMatch) {
+                            if (part) mediaId = part;
                         }
                         if (!mediaId) return null;
                         mediaIdCache[postId] = mediaId;
@@ -2699,303 +2815,200 @@
                 }
 
                 function method2() {
-                    let scriptJson = document.querySelectorAll('script[type="application/json"]');
-                    for (let i = 0; i < scriptJson.length; i++) {
-                        let match = scriptJson[i].text.match(/"pk":"(\d+)","id":"[\d_]+"/);
+                    const scriptJson = document.querySelectorAll('script[type="application/json"]');
+                    for (const script of scriptJson) {
+                        const match = script.text.match(/"pk":"(\d+)","id":"[\d_]+"/);
                         if (match) {
-                            if (!window.location.href.includes('highlights')) {
-                                return match[1];
-                            }
-                            let matchs = Array.from(scriptJson[i].text.matchAll(/"pk":"(\d+)","id":"[\d_]+"/g), match => match[1]);
+                            if (!location.href.includes('highlights')) return match[1];
+                            const matchs = Array.from(
+                                script.text.matchAll(/"pk":"(\d+)","id":"[\d_]+"/g),
+                                (m) => m[1]
+                            );
                             const matchIndex = findHighlightsIndex();
-                            if (matchs.length > matchIndex) {
-                                return matchs[matchIndex];
-                            }
+                            if (matchs.length > matchIndex) return matchs[matchIndex];
                         }
                     }
-                }
-
-                return method1() || await method3() || method2();
-            }
-
-            function getImgOrVedioUrl(item) {
-                if ("video_versions" in item) {
-                    return item.video_versions[0].url;
-                } else {
-                    return item.image_versions2.candidates[0].url;
-                }
-            }
-
-            let appId = findAppId();
-            if (!appId) return null;
-            let headers = {
-                method: 'GET',
-                headers: {
-                    Accept: '*/*',
-                    'X-IG-App-ID': appId
-                },
-                credentials: 'include',
-                mode: 'cors'
-            };
-
-            let mediaId = await findMediaId();
-            if (!mediaId) {
-                console.log("Cannot find media id");
-                return null;
-            }
-            if (!(mediaId in infoCache)) {
-                let url = 'https://i.instagram.com/api/v1/media/' + mediaId + '/info/';
-                let resp = await fetch(url, headers);
-                if (resp.status !== 200) {
-                    console.log(`Fetch info API failed with status code: ${resp.status}`);
                     return null;
                 }
-                let respJson = await resp.json();
-                infoCache[mediaId] = respJson;
+
+                return method1() || (await method3()) || method2();
             }
-            let infoJson = infoCache[mediaId];
-            if ('carousel_media' in infoJson.items[0]) {
-                // multi-media post
-                return getImgOrVedioUrl(infoJson.items[0].carousel_media[mediaIdx]);
-            } else {
-                // single media post
-                return getImgOrVedioUrl(infoJson.items[0]);
+
+            function getImgOrVideoUrl(item) {
+                if (item.video_versions) return item.video_versions[0].url;
+                return item.image_versions2.candidates[0].url;
             }
-        } catch (e) {
-            console.log(`Uncatched in getUrlFromInfoApi(): ${e}\n${e.stack}`);
+
+            const appId = findAppId();
+            if (!appId) return null;
+            const headers = {
+                method: 'GET',
+                headers: { Accept: '*/*', 'X-IG-App-ID': appId },
+                credentials: 'include',
+                mode: 'cors',
+            };
+
+            const mediaId = await findMediaId();
+            if (!mediaId) return null;
+            if (!(mediaId in infoCache)) {
+                const apiUrl = `https://i.instagram.com/api/v1/media/${mediaId}/info/`;
+                const resp = await fetch(apiUrl, headers);
+                if (resp.status !== 200) return null;
+                infoCache[mediaId] = await resp.json();
+            }
+            const infoJson = infoCache[mediaId];
+            const item = infoJson.items[0];
+            if (item.carousel_media) {
+                return getImgOrVideoUrl(item.carousel_media[mediaIdx]);
+            }
+            return getImgOrVideoUrl(item);
+        } catch (err) {
+            console.error('[Instagram_Rabbit] getUrlFromInfoApi', err);
             return null;
         }
     }
 
-    function findPostName(articleNode) {
-        // this grabs the username link that is visually in the author's post comment below the media
-        // 'article section' includes the likes section and comment box
-        // '+ * a' pulls the first element after the section that contains a link (comment box doesn't)
-        // '[href^="/"][href$="/"]' requires the href attribute to begin and end with a slash to match a username
-        let imgNoCanvas = articleNode.querySelector('article section + * a[href^="/"][href$="/"]');
-        if (imgNoCanvas) {
-            return imgNoCanvas;
-        }
-
-        // videos are handled differently
-        let imgAlt = articleNode.querySelector('canvas ~ * img');
-        if (imgAlt) {
-            imgAlt = imgAlt.getAttribute('alt');
-            let links = articleNode.querySelectorAll('a');
-            for (let i = 0; i < links.length; i++) {
-                const posterName = links[i].getAttribute('href').replace(/\//g, '');
-                if (imgAlt.includes(posterName)) {
-                    return links[i];
-                }
-            }
-        } else {
-            // first H2 with a direction set
-            const el = document.querySelector('h2[dir]');
-            return el.innerText;
-        }
+    function findHighlightsIndex() {
+        const current = document.querySelector('motion.div[style^="transform"], div[style^="transform"]');
+        if (!current?.parentElement?.parentElement) return 0;
+        const root = current.parentElement.parentElement;
+        return Array.from(root.children).indexOf(current.parentElement);
     }
 
     function findPostId(articleNode) {
-        let aNodes = articleNode.querySelectorAll('a');
-        for (let i = 0; i < aNodes.length; ++i) {
-            let link = aNodes[i].getAttribute('href');
-            if (link) {
-                let match = link.match(postIdPattern);
-                if (match) return match[1];
-            }
+        for (const a of articleNode.querySelectorAll('a[href*="/p/"]')) {
+            const match = a.getAttribute('href')?.match(postIdPattern);
+            if (match) return match[1];
         }
-        return null;
+        const m = location.pathname.match(postIdPattern);
+        return m ? m[1] : null;
     }
 
     async function fetchVideoURL(articleNode, videoElem) {
-        let poster = videoElem.getAttribute('poster');
-        let timeNodes = articleNode.querySelectorAll('time');
-        // special thanks 孙年忠 (https://greasyfork.org/en/scripts/406535-instagram-download-button/discussions/120159)
-        let posterUrl = timeNodes[timeNodes.length - 1].parentNode.parentNode.href;
-        const posterPattern = /\/([^\/?]*)\?/;
-        let posterMatch = poster.match(posterPattern);
-        let postFileName = posterMatch[1];
-        let resp = await fetch(posterUrl);
-        let content = await resp.text();
-        // special thanks to 孙年忠 for the pattern (https://greasyfork.org/zh-TW/scripts/406535-instagram-download-button/discussions/116675)
-        const pattern = new RegExp(`${postFileName}.*?video_versions.*?url":("[^"]*")`, 's');
-        let match = content.match(pattern);
+        const poster = videoElem.getAttribute('poster');
+        const timeNodes = articleNode.querySelectorAll('time');
+        const posterUrl = timeNodes[timeNodes.length - 1]?.parentElement?.parentElement?.href;
+        if (!poster || !posterUrl) return null;
+        const posterMatch = poster.match(/\/([^/?]*)\?/);
+        if (!posterMatch) return null;
+        const postFileName = posterMatch[1];
+        const resp = await fetch(posterUrl);
+        const content = await resp.text();
+        const pattern = new RegExp(
+            `${postFileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*?video_versions.*?url":("[^"]*")`,
+            's'
+        );
+        const match = content.match(pattern);
+        if (!match) return null;
         let videoUrl = JSON.parse(match[1]);
-        videoUrl = videoUrl.replace(/^(?:https?:\/\/)?(?:[^@\/\n]+@)?(?:www\.)?([^:\/?\n]+)/g, 'https://scontent.cdninstagram.com');
+        videoUrl = videoUrl.replace(
+            /^(?:https?:\/\/)?(?:[^@/\n]+@)?(?:www\.)?([^:/?\n]+)/g,
+            'https://scontent.cdninstagram.com'
+        );
         videoElem.setAttribute('videoURL', videoUrl);
         return videoUrl;
     }
 
-    // ================================
-    // ====   Story & Highlight    ====
-    // ================================
     async function storyOnMouseIn(target) {
-        let sectionNode = storyGetSectionNode(target);
-        let url = await storyGetUrl(target, sectionNode);
-        target.setAttribute('href', url);
+        const sectionNode = storyGetSectionNode(target);
+        target.dataset.arMediaUrl = (await storyGetUrl(target, sectionNode)) || '';
     }
 
     async function storyOnClicked(target) {
-        // extract url from target story and download or open it
-        let sectionNode = storyGetSectionNode(target);
-        let url = await storyGetUrl(target, sectionNode);
-        const posterUrlPat = /\/stories\/(.*)\/.*\//
-        // download or open media url
-        if (target.getAttribute('class').includes('download-btn')) {
-            let mediaName = url.split('?')[0].split('\\').pop().split('/').pop();
-            mediaName = mediaName.substring(0, mediaName.lastIndexOf('.'));
-            let datetime = new Date(sectionNode.querySelector('time').getAttribute('datetime'));
-            let posterName = "unkown";
-            // method 1
-            const posterNameHeader = sectionNode.querySelector('header a');
-            if (posterNameHeader) {
-                posterName = posterNameHeader.getAttribute('href').replace(/\//g, '');
-            }
-
-            // method 2
-            if (posterName === "unkown") {
-                const match = window.location.pathname.match(posterUrlPat);
-                if (match) {
-                    posterName = match[1];
-                }
-            }
-            let filename = filenameFormat(storyFilenameTemplate, posterName, datetime, mediaName);
+        const sectionNode = storyGetSectionNode(target);
+        const url = await storyGetUrl(target, sectionNode);
+        if (!url) return;
+        if (target.classList.contains('ar-ig-download')) {
+            let mediaName = url.split('?')[0].split('/').pop() || 'story';
+            mediaName = mediaName.includes('.')
+                ? mediaName.substring(0, mediaName.lastIndexOf('.'))
+                : mediaName;
+            const datetime = new Date(sectionNode.querySelector('time')?.getAttribute('datetime') || Date.now());
+            let posterName =
+                sectionNode.querySelector('header a')?.getAttribute('href')?.replace(/\//g, '') ||
+                'unknown';
+            const filename = filenameFormat(storyFilenameTemplate, posterName, datetime, mediaName);
             downloadResource(url, filename);
-        } else {
-            // open url in new tab
-            openResource(url);
-        }
+        } else openResource(url);
     }
 
     function storyGetSectionNode(target) {
-        let sectionNode = target;
-        while (sectionNode && sectionNode.tagName !== 'SECTION') {
-            sectionNode = sectionNode.parentNode;
-        }
-        return sectionNode;
+        let node = target;
+        while (node && node.tagName !== 'SECTION') node = node.parentNode;
+        return node;
     }
 
     async function storyGetUrl(target, sectionNode) {
-        let url = null;
-        if (!disableNewUrlFetchMethod) url = await getUrlFromInfoApi(target);
-
+        let url = !disableNewUrlFetchMethod ? await getUrlFromInfoApi(target) : null;
         if (!url) {
             if (sectionNode.querySelector('video > source')) {
                 url = sectionNode.querySelector('video > source').getAttribute('src');
-            } else if (sectionNode.querySelector('img[decoding="sync"]')) {
-                let img = sectionNode.querySelector('img[decoding="sync"]');
-                url = img.srcset.split(/ \d+w/g)[0].trim(); // extract first src from srcset attr. of img
-                if (url.length > 0) {
-                    return url;
-                }
-                url = sectionNode.querySelector('img[decoding="sync"]').getAttribute('src');
             } else if (sectionNode.querySelector('video')) {
                 url = sectionNode.querySelector('video').getAttribute('src');
+            } else if (sectionNode.querySelector('img[src]')) {
+                const img = sectionNode.querySelector('img[src]');
+                url = img.srcset?.split(/ \d+w/)[0]?.trim() || img.getAttribute('src');
             }
         }
         return url;
     }
 
-    function filenameFormat(template, id, datetime, medianame, postId = +new Date(), mediaIndex = '0') {
-        let filename = template;
-        filename = filename.replace(/%id%/g, id);
-        filename = filename.replace(/%datetime%/g, datetimeFormat(datetimeTemplate, datetime));
-        filename = filename.replace(/%medianame%/g, medianame);
-        filename = filename.replace(/%postId%/g, postId);
-        filename = filename.replace(/%mediaIndex%/g, mediaIndex);
-        return filename;
+    function filenameFormat(template, id, datetime, medianame, postId = String(Date.now()), mediaIndex = '0') {
+        return template
+            .replace(/%id%/g, id)
+            .replace(/%datetime%/g, datetimeFormat(datetimeTemplate, datetime))
+            .replace(/%medianame%/g, medianame)
+            .replace(/%postId%/g, postId)
+            .replace(/%mediaIndex%/g, mediaIndex);
     }
 
     function datetimeFormat(template, datetime) {
-        let datetimeStr = template;
-        datetimeStr = datetimeStr.replace(/%y%/g, datetime.getFullYear());
-        datetimeStr = datetimeStr.replace(/%m%/g, fillZero((datetime.getMonth() + 1).toString()));
-        datetimeStr = datetimeStr.replace(/%d%/g, fillZero(datetime.getDate().toString()));
-        datetimeStr = datetimeStr.replace(/%H%/g, fillZero(datetime.getHours().toString()));
-        datetimeStr = datetimeStr.replace(/%M%/g, fillZero(datetime.getMinutes().toString()));
-        datetimeStr = datetimeStr.replace(/%S%/g, fillZero(datetime.getSeconds().toString()));
-        return datetimeStr;
+        return template
+            .replace(/%y%/g, datetime.getFullYear())
+            .replace(/%m%/g, fillZero(String(datetime.getMonth() + 1)))
+            .replace(/%d%/g, fillZero(String(datetime.getDate())))
+            .replace(/%H%/g, fillZero(String(datetime.getHours())))
+            .replace(/%M%/g, fillZero(String(datetime.getMinutes())))
+            .replace(/%S%/g, fillZero(String(datetime.getSeconds())));
     }
 
     function fillZero(str) {
-        if (str.length === 1) {
-            return '0' + str;
-        }
-        return str;
+        return str.length === 1 ? '0' + str : str;
     }
 
     function openResource(url) {
-        // open url in new tab
-        var a = document.createElement('a');
-        a.href = url;
-        a.setAttribute('target', '_blank');
+        window.open(url, '_blank', 'noopener,noreferrer');
+    }
+
+    function forceDownload(blobUrl, filename, extension) {
+        const a = document.createElement('a');
+        a.download = `${filename}.${extension}`;
+        a.href = blobUrl;
         document.body.appendChild(a);
         a.click();
         a.remove();
     }
 
-    function forceDownload(blob, filename, extension) {
-        // ref: https://stackoverflow.com/questions/49474775/chrome-65-blocks-cross-origin-a-download-client-side-workaround-to-force-down
-        var a = document.createElement('a');
-        if (replaceJpegWithJpg) extension = extension.replace('jpeg', 'jpg');
-        a.download = filename + '.' + extension;
-        a.href = blob;
-        // For Firefox https://stackoverflow.com/a/32226068
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-    }
-
-    // Current blob size limit is around 500MB for browsers
     function downloadResource(url, filename) {
+        if (!url) return;
         if (url.startsWith('blob:')) {
             forceDownload(url, filename, 'mp4');
             return;
         }
-        console.log(`Dowloading ${url}`);
-        // ref: https://stackoverflow.com/questions/49474775/chrome-65-blocks-cross-origin-a-download-client-side-workaround-to-force-down
-        if (!filename) {
-            filename = url
-                .split('\\')
-                .pop()
-                .split('/')
-                .pop();
-        }
         fetch(url, {
             headers: new Headers({
-                'User-Agent': window.navigator.userAgent,
+                'User-Agent': navigator.userAgent,
                 Origin: location.origin,
             }),
             mode: 'cors',
+            credentials: 'include',
         })
-            .then(response => response.blob())
-            .then(blob => {
-                const extension = blob.type.split('/').pop();
-                let blobUrl = window.URL.createObjectURL(blob);
-                forceDownload(blobUrl, filename, extension);
+            .then((r) => r.blob())
+            .then((blob) => {
+                const extension = (blob.type.split('/').pop() || 'jpg').replace('jpeg', 'jpg');
+                forceDownload(URL.createObjectURL(blob), filename, extension);
             })
-            .catch(e => console.error(e));
+            .catch((err) => console.error('[Instagram_Rabbit] download failed', err));
     }
 })();
-
-// --- AlexRabbit: remove IG copy/click blockers (no external @require) ---
-(function () {
-    'use strict';
-    const BLOCK_SELECTORS = ['._aagw', 'motion.div._aagw', 'motion.div[class*="_aagw"]'];
-    const scrub = () => {
-        for (const sel of BLOCK_SELECTORS) {
-            document.querySelectorAll(sel).forEach((el) => el.remove());
-        }
-        document.querySelectorAll('motion.div').forEach((el) => {
-            const cls = el.getAttribute('class') || '';
-            if (cls.includes('_aagw')) el.remove();
-        });
-        document.querySelectorAll('motion.div[data-testid]').forEach((el) => {
-            if ((el.getAttribute('class') || '').includes('_aagw')) el.remove();
-        });
-    };
-    scrub();
-    new MutationObserver(scrub).observe(document.documentElement, { childList: true, subtree: true });
-})();
-
 
