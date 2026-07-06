@@ -1,14 +1,18 @@
 // ==UserScript==
 // @name         SimpCity_Links_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.0.1
-// @description  Export all external thread links to .txt and JDownloader .dlc (all pages, spoilers, embeds).
+// @version      1.1.0
+// @description  Export thread links to .txt + JDownloader .dlc (incremental, turbo resolver, progress UI).
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://simpcity.cr/threads/*
 // @connect      simpcity.cr
+// @connect      turbo.cr
+// @connect      turbocdn.st
 // @connect      service.jdownloader.org
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @run-at       document-idle
 // @license      MIT
 // @downloadURL  https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/SimpCity_Links_Rabbit.js
@@ -23,8 +27,10 @@
     if (!/\/threads\//i.test(location.pathname)) return;
 
     const BASE = 'https://simpcity.cr';
-    const URL_RE = /https?:\/\/[^\s<>"'\])]+/gi;
+    const URL_RE = /https?://[^\s<>"'\])]+/gi;
+    const TURBO_RE = /https?:\/\/(?:[\w-]+\.)?turbo\.cr\/(?:embed|v|d)\/([^\s/?#]+)/i;
     const JD_ENCRYPT = 'http://service.jdownloader.org/dlcrypt/service.php?jd=1&srcType=plain&data=';
+    const STATE_KEY = 'sclr_thread_state';
 
     function threadSlug(url) {
         const m = String(url || location.pathname).match(/\/threads\/([^/?#]+)/);
@@ -125,39 +131,158 @@
     function parsePageLinks(html) {
         const doc = new DOMParser().parseFromString(html, 'text/html');
         const links = [];
+        const posts = [];
         doc.querySelectorAll('article.message--post').forEach((post) => {
+            const postId = post.getAttribute('data-content') || post.id || '';
+            if (postId) posts.push(postId);
             const body = post.querySelector('article.message-body');
             if (body) links.push(...extractLinksFromBody(body));
         });
-        return { links, maxPage: getMaxPage(doc) };
+        return { links, posts, maxPage: getMaxPage(doc) };
     }
 
-    async function scrapeAllPages() {
+    function loadState() {
+        try {
+            return JSON.parse(localStorage.getItem(STATE_KEY) || '{}');
+        } catch (_) {
+            return {};
+        }
+    }
+
+    function saveState(state) {
+        localStorage.setItem(STATE_KEY, JSON.stringify(state));
+    }
+
+    function progressBar(step, total, labels) {
+        if (total < 1) total = 1;
+        step = Math.min(Math.max(step, 1), total);
+        let dots;
+        if (total === 1) {
+            dots = '◉';
+        } else {
+            const parts = [];
+            for (let i = 0; i < total; i++) {
+                if (i + 1 < step) parts.push('●');
+                else if (i + 1 === step) parts.push('◉');
+                else parts.push('○');
+                if (i < total - 1) parts.push('────');
+            }
+            dots = parts.join('');
+        }
+        const lines = [`${step}/${total}`, dots, ''];
+        labels.forEach((label, i) => {
+            if (i + 1 < step) lines.push(`🗹 ${label}`);
+            else if (i + 1 === step) {
+                const nxt = labels[i + 1] || 'Finish';
+                lines.push(`↪ ${label}↳ ${nxt}`);
+            } else lines.push(`○ ${label}`);
+        });
+        return lines.join('\n');
+    }
+
+    let progressEl;
+
+    function setProgress(step, labels, extra = '') {
+        if (!progressEl) return;
+        progressEl.style.display = 'block';
+        progressEl.textContent = progressBar(step, labels.length, labels) + (extra ? `\n\n${extra}` : '');
+    }
+
+    function gmGet(url, headers = {}) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                headers,
+                onload(resp) {
+                    resolve({ ok: resp.status === 200, status: resp.status, text: resp.responseText });
+                },
+                onerror: () => reject(new Error(`Request failed: ${url}`)),
+            });
+        });
+    }
+
+    async function resolveTurboUrl(url) {
+        const m = url.match(TURBO_RE);
+        if (!m) return url;
+        const id = m[1];
+        const embedUrl = `https://turbo.cr/embed/${id}`;
+        try {
+            const r = await gmGet(`https://turbo.cr/api/sign?v=${encodeURIComponent(id)}`, {
+                Referer: embedUrl,
+                Accept: 'application/json',
+            });
+            if (r.ok) {
+                const j = JSON.parse(r.text);
+                if (j.success && j.url) return j.url;
+            }
+        } catch (_) {}
+        return `https://turbo.cr/d/${id}`;
+    }
+
+    async function resolveTurboLinks(links, onProgress) {
+        const out = links.slice();
+        const indices = links.map((u, i) => (TURBO_RE.test(u) ? i : -1)).filter((i) => i >= 0);
+        for (let n = 0; n < indices.length; n++) {
+            const i = indices[n];
+            out[i] = await resolveTurboUrl(links[i]);
+            if (onProgress) onProgress(n + 1, indices.length);
+            await sleep(300);
+        }
+        return out;
+    }
+
+    async function scrapeAllPages(incremental, labels) {
+        const slug = threadSlug(location.href);
+        const state = loadState();
+        const threadState = state[slug] || {};
+        const knownLinks = incremental ? new Set(threadState.links || []) : new Set();
+        const knownPosts = incremental ? new Set(threadState.posts || []) : new Set();
+        const lastPage = incremental ? (threadState.max_page || 0) : 0;
+
         const threadBase = normalizeThreadUrl(location.href);
         const firstHtml = document.documentElement.outerHTML;
         const first = parsePageLinks(firstHtml);
         const maxPage = first.maxPage;
+        const startPage = incremental && lastPage ? Math.max(1, lastPage) : 1;
 
-        const seen = new Set();
-        const all = [];
-        const pushUnique = (list) => {
-            list.forEach((url) => {
+        const all = [...knownLinks];
+        const seen = new Set(all);
+        const newPosts = [];
+
+        const ingest = (links, posts, pageNum) => {
+            posts.forEach((p) => {
+                if (!knownPosts.has(p)) newPosts.push(p);
+            });
+            links.forEach((url) => {
                 if (!seen.has(url)) {
                     seen.add(url);
                     all.push(url);
                 }
             });
+            setProgress(1, labels, `Page ${pageNum}/${maxPage} — ${all.length} links`);
         };
 
-        pushUnique(first.links);
+        if (startPage <= 1) {
+            const filtered = first.links;
+            ingest(filtered, first.posts.filter((p) => !knownPosts.has(p)), 1);
+        }
 
-        for (let page = 2; page <= maxPage; page++) {
-            setStatus(`Fetching page ${page}/${maxPage}…`);
+        for (let page = Math.max(2, startPage); page <= maxPage; page++) {
+            setProgress(1, labels, `Fetching page ${page}/${maxPage}…`);
             const html = await fetchPage(`${threadBase}page-${page}`);
-            pushUnique(parsePageLinks(html).links);
+            const parsed = parsePageLinks(html);
+            ingest(parsed.links, parsed.posts.filter((p) => !knownPosts.has(p)), page);
             await sleep(400);
         }
 
+        state[slug] = {
+            links: all,
+            posts: [...new Set([...(threadState.posts || []), ...newPosts])],
+            max_page: maxPage,
+            updated: new Date().toISOString(),
+        };
+        saveState(state);
         return all;
     }
 
@@ -171,12 +296,8 @@
 
     function buildDlcXml(links, packageName) {
         const files = links
-            .map(
-                (url) =>
-                    `<file><url>${b64Text(url)}</url><filename></filename><size></size></file>`
-            )
+            .map((url) => `<file><url>${b64Text(url)}</url><filename></filename><size></size></file>`)
             .join('');
-
         return (
             '<?xml version="1.0" encoding="UTF-8"?>' +
             '<dlc><header><generator>' +
@@ -242,12 +363,6 @@
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
-    let statusEl;
-
-    function setStatus(msg) {
-        if (statusEl) statusEl.textContent = msg;
-    }
-
     function toast(msg) {
         const t = document.createElement('div');
         Object.assign(t.style, {
@@ -262,42 +377,50 @@
             fontFamily: 'system-ui, sans-serif',
             fontSize: '13px',
             maxWidth: '360px',
+            whiteSpace: 'pre-wrap',
         });
         t.textContent = msg;
         document.body.appendChild(t);
-        setTimeout(() => t.remove(), 3500);
+        setTimeout(() => t.remove(), 4000);
     }
 
-    async function exportLinks() {
+    async function exportLinks(fullScrape) {
         const btn = document.getElementById('sclr-export-btn');
-        if (btn) {
-            btn.disabled = true;
-            btn.textContent = 'Working…';
-        }
+        const fullBtn = document.getElementById('sclr-export-full-btn');
+        if (btn) btn.disabled = true;
+        if (fullBtn) fullBtn.disabled = true;
+
+        const labels = ['Scan pages', 'Resolve turbo', 'Build DLC', 'Download files'];
         try {
-            setStatus('Scanning pages…');
-            const links = await scrapeAllPages();
+            setProgress(1, labels);
+            const links = await scrapeAllPages(!fullScrape, labels);
             if (!links.length) {
                 toast('No external links found.');
                 return;
             }
+
+            setProgress(2, labels);
+            const resolved = await resolveTurboLinks(links, (n, t) =>
+                setProgress(2, labels, `Turbo ${n}/${t}`)
+            );
+
             const slug = threadSlug(location.href);
-            setStatus('Building DLC…');
-            const dlc = await createDlc(links, slug);
-            const txt = links.join('\n') + '\n';
+            setProgress(3, labels);
+            const dlc = await createDlc(resolved, slug);
+
+            setProgress(4, labels);
+            const txt = resolved.join('\n') + '\n';
             downloadText(`${slug}.txt`, txt);
             downloadText(`${slug}.dlc`, dlc, 'application/octet-stream');
-            toast(`Exported ${links.length} links → ${slug}.txt + ${slug}.dlc`);
-            setStatus(`Done — ${links.length} links`);
+
+            toast(`Exported ${resolved.length} links\n${slug}.txt + ${slug}.dlc`);
+            setProgress(4, labels, `Done — ${resolved.length} links`);
         } catch (err) {
             console.error('[SimpCity_Links_Rabbit]', err);
             toast(`Error: ${err.message || err}`);
-            setStatus('Error');
         } finally {
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = 'Export Links + DLC';
-            }
+            if (btn) btn.disabled = false;
+            if (fullBtn) fullBtn.disabled = false;
         }
     }
 
@@ -317,38 +440,51 @@
             fontFamily: 'system-ui, sans-serif',
         });
 
-        statusEl = document.createElement('div');
-        Object.assign(statusEl.style, {
-            background: 'rgba(0,0,0,0.75)',
-            color: '#aaa',
-            padding: '4px 10px',
-            borderRadius: '4px',
-            fontSize: '11px',
+        progressEl = document.createElement('div');
+        Object.assign(progressEl.style, {
+            background: 'rgba(0,0,0,0.88)',
+            color: '#ccc',
+            padding: '10px 14px',
+            borderRadius: '8px',
+            fontSize: '12px',
+            lineHeight: '1.5',
+            whiteSpace: 'pre-wrap',
             display: 'none',
+            maxWidth: '320px',
+            border: '1px solid #553982',
         });
 
-        const btn = document.createElement('button');
-        btn.id = 'sclr-export-btn';
-        btn.textContent = 'Export Links + DLC';
-        Object.assign(btn.style, {
+        const btnRow = document.createElement('div');
+        Object.assign(btnRow.style, { display: 'flex', gap: '8px' });
+
+        const btnStyle = {
             background: 'linear-gradient(135deg, #553982, #7b52b8)',
             color: '#fff',
             border: 'none',
-            padding: '10px 16px',
+            padding: '10px 14px',
             borderRadius: '8px',
             cursor: 'pointer',
-            fontSize: '14px',
+            fontSize: '13px',
             fontWeight: '600',
             boxShadow: '0 4px 14px rgba(0,0,0,0.45)',
-        });
-        btn.addEventListener('click', exportLinks);
-        btn.addEventListener('mouseenter', () => { statusEl.style.display = 'block'; });
-        btn.addEventListener('mouseleave', () => {
-            if (!btn.disabled) statusEl.style.display = 'none';
-        });
+        };
 
-        wrap.appendChild(statusEl);
-        wrap.appendChild(btn);
+        const btn = document.createElement('button');
+        btn.id = 'sclr-export-btn';
+        btn.textContent = 'Export (+new)';
+        Object.assign(btn.style, btnStyle);
+        btn.addEventListener('click', () => exportLinks(false));
+
+        const fullBtn = document.createElement('button');
+        fullBtn.id = 'sclr-export-full-btn';
+        fullBtn.textContent = 'Full export';
+        Object.assign(fullBtn.style, { ...btnStyle, background: 'linear-gradient(135deg, #333, #555)' });
+        fullBtn.addEventListener('click', () => exportLinks(true));
+
+        btnRow.appendChild(btn);
+        btnRow.appendChild(fullBtn);
+        wrap.appendChild(progressEl);
+        wrap.appendChild(btnRow);
         document.body.appendChild(wrap);
     }
 
