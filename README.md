@@ -12,7 +12,9 @@ Tuned for **[AdGuard for Windows](https://adguard.com/kb/general/extensions/)** 
 1. Open **AdGuard → Settings → Extensions**
 2. **Add extension** → paste a **raw** install URL from the table below  
 
-AdGuard is pickier than Tampermonkey: prefer scripts with **`@grant none`** and no exotic APIs.
+AdGuard supports `@grant` and `GM_xmlhttpRequest`; scripts that make cross-origin requests need their declared permissions. Do not change them to `@grant none`. See [AdGuard compatibility documentation](https://adguard.com/kb/general/extensions/#compatibility).
+
+For missing SimpCity export buttons, see [the diagnosis and installation guide](ADGUARD_AUDIT.md).
 
 ---
 

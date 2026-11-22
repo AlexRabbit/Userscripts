@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SimpCity_Links_Rabbit
 // @namespace    https://github.com/AlexRabbit/Userscripts
-// @version      1.1.0
+// @version      1.1.1
 // @description  Export thread links to .txt + JDownloader .dlc (incremental, turbo resolver, progress UI).
 // @author       AlexRabbit (https://github.com/AlexRabbit)
 // @match        https://simpcity.cr/threads/*
@@ -10,9 +10,6 @@
 // @connect      turbocdn.st
 // @connect      service.jdownloader.org
 // @grant        GM_xmlhttpRequest
-// @grant        GM_download
-// @grant        GM_setValue
-// @grant        GM_getValue
 // @run-at       document-idle
 // @license      MIT
 // @downloadURL  https://raw.githubusercontent.com/AlexRabbit/Userscripts/main/SimpCity_Links_Rabbit.js
@@ -26,8 +23,8 @@
 
     if (!/\/threads\//i.test(location.pathname)) return;
 
-    const BASE = 'https://simpcity.cr';
-    const URL_RE = /https?://[^\s<>"'\])]+/gi;
+    const BASE = location.origin;
+    const URL_RE = /https?:\/\/[^\s<>"'\])]+/gi;
     const TURBO_RE = /https?:\/\/(?:[\w-]+\.)?turbo\.cr\/(?:embed|v|d)\/([^\s/?#]+)/i;
     const JD_ENCRYPT = 'http://service.jdownloader.org/dlcrypt/service.php?jd=1&srcType=plain&data=';
     const STATE_KEY = 'sclr_thread_state';
@@ -86,15 +83,18 @@
         };
 
         body.querySelectorAll('a[href]').forEach((a) => {
-            const href = decodeURIComponent(a.getAttribute('href') || '');
+            // Preserve escaped query delimiters; malformed percent escapes must not abort a scan.
+            const href = a.getAttribute('href') || '';
             const decoded = decodeRedirect(href);
             if (decoded) add(decoded);
             else if (/^https?:\/\//i.test(href)) add(href);
         });
 
-        body.querySelectorAll('iframe[src], embed[src], video[src], source[src]').forEach((el) => {
+        body.querySelectorAll('iframe[src], embed[src], video[src], source[src], iframe[data-src], video[data-src], source[data-src]').forEach((el) => {
             const src = el.getAttribute('src') || el.getAttribute('data-src');
-            if (src) add(new URL(src, BASE).href);
+            if (src) {
+                try { add(new URL(src, BASE).href); } catch (_) {}
+            }
         });
 
         body.querySelectorAll('[data-url], [data-href], [data-link]').forEach((el) => {
@@ -104,7 +104,7 @@
             });
         });
 
-        const text = body.innerText || '';
+        const text = body.innerText || body.textContent || '';
         let m;
         URL_RE.lastIndex = 0;
         while ((m = URL_RE.exec(text)) !== null) add(m[0]);
@@ -192,6 +192,8 @@
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'GET',
+                timeout: 30000,
+                ontimeout: () => reject(new Error('Request timed out')),
                 url,
                 headers,
                 onload(resp) {
@@ -241,9 +243,10 @@
         const lastPage = incremental ? (threadState.max_page || 0) : 0;
 
         const threadBase = normalizeThreadUrl(location.href);
-        const firstHtml = document.documentElement.outerHTML;
+        const currentPage = Number(location.pathname.match(/\/page-(\d+)/)?.[1] || 1);
+        const firstHtml = currentPage === 1 ? document.documentElement.outerHTML : await fetchPage(threadBase);
         const first = parsePageLinks(firstHtml);
-        const maxPage = first.maxPage;
+        const maxPage = Math.max(first.maxPage, getMaxPage(document), currentPage);
         const startPage = incremental && lastPage ? Math.max(1, lastPage) : 1;
 
         const all = [...knownLinks];
@@ -324,6 +327,8 @@
             GM_xmlhttpRequest({
                 method: 'GET',
                 url: JD_ENCRYPT + encodeURIComponent(rcp),
+                timeout: 30000,
+                ontimeout: () => reject(new Error('JDownloader DLC service timed out')),
                 onload(resp) {
                     const m = resp.responseText.match(/<rc>([\s\S]*?)<\/rc>/);
                     if (m) resolve(m[1].trim());
@@ -335,6 +340,7 @@
     }
 
     async function createDlc(links, packageName) {
+        if (typeof CryptoJS === 'undefined') throw new Error('CryptoJS dependency unavailable');
         const xml = buildDlcXml(links, packageName);
         const payload = b64Text(xml);
         const rcp = randomRcp();
@@ -350,10 +356,6 @@
     function downloadText(filename, content, mime) {
         const blob = new Blob([content], { type: mime || 'text/plain;charset=utf-8' });
         const url = URL.createObjectURL(blob);
-        if (typeof GM_download === 'function') {
-            GM_download({ url, name: filename, saveAs: false, onload: () => URL.revokeObjectURL(url) });
-            return;
-        }
         const a = document.createElement('a');
         a.href = url;
         a.download = filename;
@@ -405,12 +407,20 @@
             );
 
             const slug = threadSlug(location.href);
-            setProgress(3, labels);
-            const dlc = await createDlc(resolved, slug);
-
-            setProgress(4, labels);
+            // TXT remains useful even if the external DLC service is unavailable.
             const txt = resolved.join('\n') + '\n';
             downloadText(`${slug}.txt`, txt);
+            setProgress(3, labels);
+            let dlc;
+            try {
+                dlc = await createDlc(resolved, slug);
+            } catch (err) {
+                console.warn('[SimpCity_Links_Rabbit] DLC unavailable', err);
+                toast(`TXT exported (${resolved.length} links). DLC unavailable: ${err.message || err}`);
+                setProgress(4, labels, 'TXT exported; DLC unavailable.');
+                return;
+            }
+            setProgress(4, labels);
             downloadText(`${slug}.dlc`, dlc, 'application/octet-stream');
 
             toast(`Exported ${resolved.length} links\n${slug}.txt + ${slug}.dlc`);
